@@ -1,0 +1,15 @@
+# 将 erp.example.com 替换为实际域名。
+# 使用真实域名时，Caddy 会自动申请和续期 HTTPS 证书。
+erp.example.com {
+    encode gzip zstd
+
+    handle /api/* {
+        reverse_proxy 127.0.0.1:43127
+    }
+
+    handle {
+        root * /root/Memory-Modules-ERP-MES/apps/web/dist
+        try_files {path} /index.html
+        file_server
+    }
+}

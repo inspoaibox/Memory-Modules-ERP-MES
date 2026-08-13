@@ -22,7 +22,7 @@
 浏览器
   |
   v
-Nginx : 80/443
+Caddy : 80/443
   |-- /              -> apps/web/dist 静态前端
   |-- /api/*         -> 127.0.0.1:43127
   |
@@ -35,7 +35,7 @@ Nginx : 80/443
 说明：
 
 - PM2 只守护后端 API。
-- 前端构建为静态文件，由 Nginx 提供，不需要使用 `vite dev` 或 `vite preview`。
+- 前端构建为静态文件，由 Caddy 提供，不需要使用 `vite dev` 或 `vite preview`。
 - SQLite 是应用内置数据库，不需要安装 MySQL、PostgreSQL 或单独启动数据库服务。
 - API 第一次启动时自动创建数据库目录、数据库文件、表、权限、系统管理员和内置基础数据。
 - 数据库路径取决于 API 的工作目录。项目提供的 PM2 配置会把工作目录固定为 `apps/api`，因此生产数据库路径为：
@@ -52,13 +52,13 @@ Nginx : 80/443
 | pnpm | 10.15.0 |
 | API | 43127 |
 | 前端开发服务器 | 43128，仅本地开发使用 |
-| 生产入口 | Nginx 80/443 |
+| 生产入口 | Caddy 80/443 |
 | 数据库 | SQLite + better-sqlite3 |
 | PM2 进程名 | `memory-erp-mes-api` |
 
 端口说明：
 
-- 生产对外只开放 Nginx 的 80/443。
+- 生产对外只开放 Caddy 的 80/443。
 - API 的 43127 只监听本机或内网，不要直接暴露到公网。
 - 43128 是 Vite 开发端口，生产环境不启动。
 
@@ -70,7 +70,7 @@ Nginx : 80/443
 
 ```bash
 apt-get update
-apt-get install -y ca-certificates curl gnupg git build-essential python3 make g++ sqlite3 nginx acl
+apt-get install -y ca-certificates curl gnupg git build-essential python3 make g++ sqlite3 acl
 ```
 
 这些依赖的用途：
@@ -78,9 +78,32 @@ apt-get install -y ca-certificates curl gnupg git build-essential python3 make g
 - `git`：获取和更新项目。
 - `build-essential`、`python3`、`make`、`g++`：编译 `better-sqlite3` 等 Node.js 原生依赖。
 - `sqlite3`：执行数据库检查、在线备份和恢复验证。
-- `nginx`：提供前端静态文件并代理 `/api`。
+- `acl`：允许 Caddy 服务账号读取 `/root` 下的前端构建目录。
 
-### 3.2 安装 Node.js 24
+### 3.2 安装 Caddy
+
+Caddy 使用官方 Debian/Ubuntu 软件源安装，并作为 systemd 服务运行：
+
+```bash
+apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' |
+  gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' |
+  tee /etc/apt/sources.list.d/caddy-stable.list
+chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+chmod o+r /etc/apt/sources.list.d/caddy-stable.list
+apt-get update
+apt-get install -y caddy
+```
+
+检查 Caddy 服务：
+
+```bash
+caddy version
+systemctl status caddy --no-pager
+```
+
+### 3.3 安装 Node.js 24
 
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
@@ -94,7 +117,7 @@ node --version
 npm --version
 ```
 
-### 3.3 安装 pnpm 10.15.0
+### 3.4 安装 pnpm 10.15.0
 
 ```bash
 corepack enable
@@ -111,14 +134,14 @@ corepack prepare pnpm@10.15.0 --activate
 pnpm --version
 ```
 
-### 3.4 安装 PM2
+### 3.5 安装 PM2
 
 ```bash
 npm install --global pm2
 pm2 --version
 ```
 
-### 3.5 最终检查
+### 3.6 最终检查
 
 ```bash
 node --version
@@ -126,7 +149,7 @@ pnpm --version
 git --version
 pm2 --version
 sqlite3 --version
-nginx -v
+caddy version
 ```
 
 在这一步之前不要执行项目的 `pnpm install`。如果 `node`、`pnpm` 或 `pm2` 仍然显示 `command not found`，先处理系统安装和 PATH，不要继续启动项目。
@@ -308,68 +331,115 @@ pm2 logs memory-erp-mes-api --lines 100
 
 首次初始化完成后，使用账号 `admin` 和 `.env` 中的 `INITIAL_ADMIN_PASSWORD` 登录，然后立即修改密码。
 
-## 8. 配置 Nginx
+### 7.3 如果提示 `ecosystem.config.cjs not found`
 
-项目放在 `/root` 下时，Nginx 的 `www-data` 用户默认可能无法读取 root 家目录。只给 Nginx 静态前端目录读取权限，不要把 `.env` 或数据库目录开放给 Nginx：
-
-```bash
-setfacl -m u:www-data:--x /root
-setfacl -m u:www-data:--x /root/Memory-Modules-ERP-MES
-setfacl -m u:www-data:--x /root/Memory-Modules-ERP-MES/apps
-setfacl -m u:www-data:--x /root/Memory-Modules-ERP-MES/apps/web
-setfacl -R -m u:www-data:rX /root/Memory-Modules-ERP-MES/apps/web/dist
-```
-
-创建站点配置：
+这表示服务器当前目录没有同步项目根目录的 PM2 配置文件，不是前端或后端构建失败。先检查：
 
 ```bash
-nano /etc/nginx/sites-available/memory-erp-mes
+cd /root/Memory-Modules-ERP-MES
+pwd
+git status --short
+git log -1 --oneline
+ls -l ecosystem.config.cjs
 ```
 
-写入以下内容：
-
-```nginx
-server {
-    listen 80;
-    listen [::]:80;
-    server_name _;
-
-    root /root/Memory-Modules-ERP-MES/apps/web/dist;
-    index index.html;
-    client_max_body_size 20m;
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:43127;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-}
-```
-
-启用配置并检查：
+如果项目是 Git 克隆的，并且服务器没有需要保留的本地修改：
 
 ```bash
-ln -s /etc/nginx/sites-available/memory-erp-mes /etc/nginx/sites-enabled/memory-erp-mes
-rm -f /etc/nginx/sites-enabled/default
-nginx -t
-systemctl enable nginx
-systemctl restart nginx
+cd /root/Memory-Modules-ERP-MES
+git fetch origin
+git pull --ff-only origin main
+ls -l ecosystem.config.cjs
 ```
 
-访问：
+如果项目是压缩包或文件上传方式部署，请把根目录的 `ecosystem.config.cjs` 上传到：
 
 ```text
-http://服务器IP/
+/root/Memory-Modules-ERP-MES/ecosystem.config.cjs
 ```
 
-生产环境建议继续配置域名和 HTTPS。API 的 43127 不需要被浏览器直接访问，浏览器统一访问 Nginx 的 `/api`。
+然后使用标准命令：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 status
+```
+
+如果需要立即启动、但暂时无法同步配置文件，可以直接使用等效的 PM2 命令：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+pm2 start apps/api/dist/index.js \
+  --name memory-erp-mes-api \
+  --cwd /root/Memory-Modules-ERP-MES/apps/api \
+  --node-args="--env-file=.env" \
+  --time \
+  --max-memory-restart 512M
+pm2 save
+pm2 status
+```
+
+这个临时命令和 `ecosystem.config.cjs` 使用相同的 API 工作目录、环境变量文件、进程名和内存限制。配置文件同步后，不要重复启动第二个 API 进程；先检查：
+
+```bash
+pm2 status
+```
+
+如果已经存在 `memory-erp-mes-api`，继续使用它即可。只有确认没有该进程时，才执行 `pm2 start ecosystem.config.cjs`。
+
+## 8. 配置 Caddy
+
+如果服务器之前安装过 Nginx，必须先停止并禁止其开机启动，否则会和 Caddy 争用 80/443 端口：
+
+```bash
+systemctl stop nginx 2>/dev/null || true
+systemctl disable nginx 2>/dev/null || true
+```
+
+项目放在 `/root` 下时，Caddy 的 `caddy` 服务账号默认可能无法读取 root 家目录。只给 Caddy 静态前端目录读取权限，不要把 `.env` 或数据库目录开放给 Caddy：
+
+```bash
+setfacl -m u:caddy:--x /root
+setfacl -m u:caddy:--x /root/Memory-Modules-ERP-MES
+setfacl -m u:caddy:--x /root/Memory-Modules-ERP-MES/apps
+setfacl -m u:caddy:--x /root/Memory-Modules-ERP-MES/apps/web
+setfacl -R -m u:caddy:rX /root/Memory-Modules-ERP-MES/apps/web/dist
+```
+
+项目根目录已经提供 `Caddyfile` 模板。先把其中的 `erp.example.com` 替换成真实域名；如果暂时只用 IP，可改成 `:80`，但不会自动申请公网 HTTPS 证书：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+nano Caddyfile
+```
+
+将配置安装到 Caddy 默认配置路径：
+
+```bash
+install -o root -g caddy -m 640 Caddyfile /etc/caddy/Caddyfile
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+systemctl enable caddy
+systemctl restart caddy
+```
+
+检查 Caddy：
+
+```bash
+systemctl status caddy --no-pager
+journalctl -u caddy -n 100 --no-pager
+curl -I http://127.0.0.1/
+curl http://127.0.0.1/api/health
+```
+
+访问地址：
+
+```text
+https://你的域名/
+```
+
+使用真实域名且 DNS 已指向服务器时，Caddy 会自动申请和续期 HTTPS 证书。API 的 43127 不需要被浏览器直接访问，浏览器统一访问 Caddy 的 `/api`。
 
 ## 9. PM2 开机自启动和维护
 
@@ -407,7 +477,7 @@ pnpm --filter @memory/api dev
 pnpm --filter @memory/web dev
 ```
 
-这两个命令只用于本地开发热更新。生产环境后端由 PM2 管理，前端由 Nginx 管理。
+这两个命令只用于本地开发热更新。生产环境后端由 PM2 管理，前端由 Caddy 管理。
 
 ## 10. 数据库备份和恢复
 
@@ -529,8 +599,8 @@ curl http://127.0.0.1:43127/api/health
 df -h
 du -sh apps/api/data
 du -sh /root/.pm2/logs
-nginx -t
-systemctl status nginx --no-pager
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+systemctl status caddy --no-pager
 ```
 
 可选安装 PM2 日志轮转：
@@ -610,7 +680,7 @@ curl -I http://127.0.0.1/
 ```
 
 - API 健康检查失败：检查 PM2、端口、环境变量和 SQLite 原生模块。
-- API 健康检查正常但页面请求失败：检查 Nginx `/api/` 代理。
+- API 健康检查正常但页面请求失败：检查 Caddy `/api/*` 反向代理。
 - 页面能打开但提示账号密码错误：核对账号状态和密码。
 - 首次登录提示必须修改密码：使用 `INITIAL_ADMIN_PASSWORD` 登录后修改。
 
@@ -634,12 +704,12 @@ pm2 restart memory-erp-mes-api
 
 ```bash
 test -f /root/Memory-Modules-ERP-MES/apps/web/dist/index.html
-nginx -t
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 curl -I http://127.0.0.1/
 curl http://127.0.0.1/api/health
 ```
 
-确认 Nginx 根目录为 `apps/web/dist`，并且 `/api/` 代理目标为 `127.0.0.1:43127`。SPA 路由必须保留 `try_files ... /index.html`。
+确认 Caddy 根目录为 `apps/web/dist`，并且 `/api/*` 代理目标为 `127.0.0.1:43127`。SPA 路由必须保留 `try_files {path} /index.html`。
 
 ## 14. 权限和数据安全
 
@@ -652,7 +722,8 @@ curl http://127.0.0.1/api/health
 - 生产工单的暂停、继续、停止、终止、关闭和删除必须遵守状态规则。
 - 商品、仓库、库存单据、生产工单、维修和权限修改必须保留审计记录。
 - `.env`、SQLite 数据库和备份文件不得放进前端静态目录。
-- API 端口只允许本机或内网访问，公网通过 Nginx HTTPS 访问。
+- API 端口只允许本机或内网访问，公网通过 Caddy HTTPS 访问。
+- 生产环境不需要安装或运行 Nginx，避免与 Caddy 争用 80/443 端口。
 
 ## 15. Windows 本地开发
 
