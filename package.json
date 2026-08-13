@@ -1,0 +1,12 @@
+{
+  "name": "memory-modules-erp-mes",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.15.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @memory/api --filter @memory/web dev",
+    "build": "pnpm --filter @memory/api build && pnpm --filter @memory/web build",
+    "typecheck": "pnpm --filter @memory/api typecheck && pnpm --filter @memory/web typecheck",
+    "seed:demo": "pnpm --filter @memory/api seed:demo"
+  }
+}
