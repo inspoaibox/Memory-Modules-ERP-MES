@@ -144,6 +144,22 @@ const builtinProductionProcesses: BuiltinProductionProcess[] = [
     roleCodes: ["OPERATOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
   },
   {
+    code: "PROC-DISASSEMBLY",
+    name: "生产拆解",
+    processType: "manufacturing",
+    sortOrder: 15,
+    description: "按生产工单执行成品、半成品或物料的拆解作业",
+    roleCodes: ["OPERATOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
+  },
+  {
+    code: "PROC-ASSEMBLY",
+    name: "生产组装",
+    processType: "manufacturing",
+    sortOrder: 16,
+    description: "按生产工单执行半成品、原材料或组件的组装作业",
+    roleCodes: ["OPERATOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
+  },
+  {
     code: "PROC-CHIP-TEST",
     name: "芯片初测",
     processType: "testing",
@@ -539,6 +555,64 @@ export function initializeDatabase() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS production_disassembly_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      report_id INTEGER NOT NULL UNIQUE REFERENCES production_reports(id) ON DELETE CASCADE,
+      task_id INTEGER NOT NULL REFERENCES production_tasks(id) ON DELETE CASCADE,
+      source_warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE RESTRICT,
+      source_lot_no TEXT NOT NULL DEFAULT '',
+      source_serial_no TEXT NOT NULL DEFAULT '',
+      source_quantity REAL NOT NULL CHECK (source_quantity > 0),
+      issue_document_id INTEGER NOT NULL UNIQUE REFERENCES stock_documents(id) ON DELETE RESTRICT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'posted')),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS production_disassembly_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      disassembly_report_id INTEGER NOT NULL REFERENCES production_disassembly_reports(id) ON DELETE CASCADE,
+      line_no INTEGER NOT NULL,
+      item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE RESTRICT,
+      quantity REAL NOT NULL CHECK (quantity > 0),
+      destination_type TEXT NOT NULL CHECK (destination_type IN ('warehouse', 'process')),
+      warehouse_id INTEGER REFERENCES warehouses(id) ON DELETE RESTRICT,
+      route_id INTEGER REFERENCES production_routes(id) ON DELETE RESTRICT,
+      start_process_id INTEGER REFERENCES production_processes(id) ON DELETE RESTRICT,
+      receipt_document_id INTEGER REFERENCES stock_documents(id) ON DELETE RESTRICT,
+      child_work_order_id INTEGER REFERENCES production_work_orders(id) ON DELETE RESTRICT,
+      lot_no TEXT NOT NULL DEFAULT '',
+      serial_no TEXT NOT NULL DEFAULT '',
+      remark TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (disassembly_report_id, line_no)
+    );
+
+    CREATE TABLE IF NOT EXISTS production_assembly_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      report_id INTEGER NOT NULL UNIQUE REFERENCES production_reports(id) ON DELETE CASCADE,
+      task_id INTEGER NOT NULL REFERENCES production_tasks(id) ON DELETE CASCADE,
+      output_quantity REAL NOT NULL CHECK (output_quantity > 0),
+      output_document_id INTEGER REFERENCES stock_documents(id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'posted')),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS production_assembly_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      assembly_report_id INTEGER NOT NULL REFERENCES production_assembly_reports(id) ON DELETE CASCADE,
+      line_no INTEGER NOT NULL,
+      item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE RESTRICT,
+      source_warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE RESTRICT,
+      unit_quantity REAL NOT NULL CHECK (unit_quantity > 0),
+      quantity REAL NOT NULL CHECK (quantity > 0),
+      lot_no TEXT NOT NULL DEFAULT '',
+      serial_no TEXT NOT NULL DEFAULT '',
+      issue_document_id INTEGER NOT NULL REFERENCES stock_documents(id) ON DELETE RESTRICT,
+      remark TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (assembly_report_id, line_no)
+    );
+
     CREATE TABLE IF NOT EXISTS production_repairs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       repair_no TEXT NOT NULL UNIQUE,
@@ -845,6 +919,14 @@ export function initializeDatabase() {
   if (!reportColumns.some((column) => column.name === "operation_data")) {
     db.exec("ALTER TABLE production_reports ADD COLUMN operation_data TEXT NOT NULL DEFAULT '{}'");
   }
+  const disassemblyReportColumns = db.prepare("PRAGMA table_info(production_disassembly_reports)").all() as Array<{ name: string }>;
+  if (!disassemblyReportColumns.some((column) => column.name === "status")) {
+    db.exec("ALTER TABLE production_disassembly_reports ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'");
+  }
+  const assemblyReportColumns = db.prepare("PRAGMA table_info(production_assembly_reports)").all() as Array<{ name: string }>;
+  if (!assemblyReportColumns.some((column) => column.name === "output_document_id")) {
+    db.exec("ALTER TABLE production_assembly_reports ADD COLUMN output_document_id INTEGER REFERENCES stock_documents(id) ON DELETE SET NULL");
+  }
   const repairColumns = db.prepare("PRAGMA table_info(production_repairs)").all() as Array<{ name: string }>;
   const repairColumnMigrations: Array<[string, string]> = [
     ["item_specification", "TEXT NOT NULL DEFAULT ''"],
@@ -955,6 +1037,48 @@ export function initializeDatabase() {
     initializeBuiltinProcesses();
   }
 
+  // Existing databases already have the original bootstrap flag, so new built-in
+  // stations are applied through a one-time compatibility migration.
+  const assemblyDisassemblyProcessMigration = db
+    .prepare("SELECT flag_key FROM system_bootstrap_flags WHERE flag_key = ?")
+    .get("builtin-production-processes-assembly-disassembly") as { flag_key: string } | undefined;
+  if (!assemblyDisassemblyProcessMigration) {
+    const addAssemblyDisassemblyProcesses = db.transaction(() => {
+      const insertProcess = db.prepare(
+        `INSERT OR IGNORE INTO production_processes
+         (code, name, process_type, sort_order, description)
+         VALUES (?, ?, ?, ?, ?)`
+      );
+      const insertRoleAuthorization = db.prepare(
+        `INSERT OR IGNORE INTO production_process_role_authorizations (process_id, role_id)
+         VALUES (?, ?)`
+      );
+      for (const process of builtinProductionProcesses.filter((item) => ["PROC-DISASSEMBLY", "PROC-ASSEMBLY"].includes(item.code))) {
+        insertProcess.run(
+          process.code,
+          process.name,
+          process.processType,
+          process.sortOrder,
+          process.description
+        );
+        const row = db
+          .prepare("SELECT id FROM production_processes WHERE code = ?")
+          .get(process.code) as { id: number } | undefined;
+        if (!row) continue;
+        for (const roleCode of process.roleCodes) {
+          const role = db
+            .prepare("SELECT id FROM roles WHERE code = ? AND status = 'active'")
+            .get(roleCode) as { id: number } | undefined;
+          if (role) insertRoleAuthorization.run(row.id, role.id);
+        }
+      }
+      db
+        .prepare("INSERT INTO system_bootstrap_flags (flag_key) VALUES (?)")
+        .run("builtin-production-processes-assembly-disassembly");
+    });
+    addAssemblyDisassemblyProcesses();
+  }
+
   const routeBootstrapFlag = db
     .prepare("SELECT flag_key FROM system_bootstrap_flags WHERE flag_key = ?")
     .get("builtin-production-route") as { flag_key: string } | undefined;
@@ -1028,6 +1152,74 @@ export function initializeDatabase() {
       db.prepare("INSERT INTO system_bootstrap_flags (flag_key) VALUES (?)").run("builtin-production-route");
     });
     initializeBuiltinRoute();
+  }
+
+  const extraRouteBootstrapFlag = db
+    .prepare("SELECT flag_key FROM system_bootstrap_flags WHERE flag_key = ?")
+    .get("builtin-production-route-disassembly-assembly") as { flag_key: string } | undefined;
+  if (!extraRouteBootstrapFlag) {
+    const initializeExtraRoutes = db.transaction(() => {
+      const productionDepartment = db
+        .prepare("SELECT id FROM departments WHERE code = 'PRODUCTION' AND status = 'active'")
+        .get() as { id: number } | undefined;
+      const processRows = db
+        .prepare("SELECT id, code FROM production_processes WHERE code IN (?, ?)")
+        .all("PROC-DISASSEMBLY", "PROC-ASSEMBLY") as Array<{ id: number; code: string }>;
+      const processIdByCode = new Map(processRows.map((process) => [process.code, process.id]));
+      if (!productionDepartment || !processIdByCode.has("PROC-DISASSEMBLY") || !processIdByCode.has("PROC-ASSEMBLY")) {
+        throw new Error("内置拆解/组装路线依赖的部门或工序不存在");
+      }
+
+      const routes = [
+        {
+          code: "ROUTE-MEMORY-DISASSEMBLY",
+          name: "生产拆解路线",
+          description: "内置生产拆解模板；按工单发起拆解后可继续流转元器件或入库",
+          steps: [
+            ["PROC-DISASSEMBLY", productionDepartment.id, "拆解完成后按元器件去向流转", 0]
+          ] as Array<[string, number, string, number]>
+        },
+        {
+          code: "ROUTE-MEMORY-ASSEMBLY",
+          name: "生产组装路线",
+          description: "内置生产组装模板；按工单发起组装后继续常规流转",
+          steps: [
+            ["PROC-ASSEMBLY", productionDepartment.id, "组装完成后进入下一道工序", 0]
+          ] as Array<[string, number, string, number]>
+        }
+      ];
+      const insertRoute = db.prepare(
+        `INSERT OR IGNORE INTO production_routes
+         (code, name, product_item_id, description)
+         VALUES (?, ?, NULL, ?)`
+      );
+      const updateRoute = db.prepare(
+        "UPDATE production_routes SET name = ?, product_item_id = NULL, description = ?, status = 'active', updated_at = CURRENT_TIMESTAMP WHERE code = ?"
+      );
+      const insertStep = db.prepare(
+        `INSERT INTO production_route_steps
+         (route_id, process_id, step_no, default_department_id, output_target,
+          output_item_id, output_warehouse_id, quality_gate, description)
+         VALUES (?, ?, ?, ?, 'next_process', NULL, NULL, 0, ?)`
+      );
+      for (const routeSpec of routes) {
+        insertRoute.run(routeSpec.code, routeSpec.name, routeSpec.description);
+        updateRoute.run(routeSpec.name, routeSpec.description, routeSpec.code);
+        const route = db
+          .prepare("SELECT id FROM production_routes WHERE code = ?")
+          .get(routeSpec.code) as { id: number } | undefined;
+        if (!route) continue;
+        const stepCount = (
+          db.prepare("SELECT COUNT(*) AS count FROM production_route_steps WHERE route_id = ?").get(route.id) as { count: number }
+        ).count;
+        if (stepCount > 0) continue;
+        routeSpec.steps.forEach(([processCode, departmentId, description], index) => {
+          insertStep.run(route.id, processIdByCode.get(processCode), index + 1, departmentId, description);
+        });
+      }
+      db.prepare("INSERT INTO system_bootstrap_flags (flag_key) VALUES (?)").run("builtin-production-route-disassembly-assembly");
+    });
+    initializeExtraRoutes();
   }
 
   const insertUnit = db.prepare(

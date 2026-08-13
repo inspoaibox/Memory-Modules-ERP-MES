@@ -396,6 +396,219 @@ function getPendingProductionInventoryDocumentId(taskId: number) {
   return result?.documentId ?? null;
 }
 
+function finalizeDisassemblyReportForPostedDocument(documentId: number) {
+  const completeDisassemblyTask = (taskId: number) => {
+    const task = db
+      .prepare(
+        `SELECT id, work_order_id AS workOrderId, work_order_item_id AS workOrderItemId,
+                sequence_no AS sequenceNo
+         FROM production_tasks
+         WHERE id = ?`
+      )
+      .get(taskId) as
+      | { id: number; workOrderId: number; workOrderItemId: number | null; sequenceNo: number }
+      | undefined;
+    if (!task) return;
+    const itemScope = task.workOrderItemId === null ? "work_order_item_id IS NULL" : "work_order_item_id = ?";
+    const itemScopeParams = task.workOrderItemId === null ? [] : [task.workOrderItemId];
+    db.prepare(
+      `UPDATE production_tasks
+       SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+       WHERE work_order_id = ? AND ${itemScope} AND sequence_no > ? AND status IN ('pending', 'ready')`
+    ).run(task.workOrderId, ...itemScopeParams, task.sequenceNo);
+    db.prepare(
+      `UPDATE production_tasks
+       SET status = 'completed', flow_status = 'active', output_document_id = NULL,
+           completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run(task.id);
+    updateProductionWorkOrderProgress(task.workOrderId);
+  };
+
+  const sourceReport = db
+    .prepare(
+      `SELECT dr.id, dr.task_id AS taskId, dr.source_quantity AS sourceQuantity,
+              dr.issue_document_id AS issueDocumentId
+       FROM production_disassembly_reports dr
+       WHERE dr.issue_document_id = ?`
+    )
+    .get(documentId) as
+    | { id: number; taskId: number; sourceQuantity: number; issueDocumentId: number }
+    | undefined;
+  if (sourceReport) {
+    const outputDocuments = (
+      db
+        .prepare(
+          `SELECT DISTINCT receipt_document_id AS documentId
+           FROM production_disassembly_lines
+           WHERE disassembly_report_id = ? AND receipt_document_id IS NOT NULL`
+        )
+        .all(sourceReport.id) as Array<{ documentId: number }>
+    ).map((entry) => entry.documentId);
+    const pendingOutputCount = outputDocuments.length
+      ? (
+          db
+            .prepare(
+              `SELECT COUNT(*) AS count
+               FROM stock_documents
+               WHERE id IN (${outputDocuments.map(() => "?").join(",")})
+                 AND status <> 'posted'`
+            )
+            .get(...outputDocuments) as { count: number }
+        ).count
+      : 0;
+    if (pendingOutputCount > 0) return;
+    db.prepare("UPDATE production_disassembly_reports SET status = 'posted' WHERE id = ?").run(sourceReport.id);
+    completeDisassemblyTask(sourceReport.taskId);
+    return;
+  }
+
+  const outputReport = db
+    .prepare(
+      `SELECT dr.id, dr.task_id AS taskId
+       FROM production_disassembly_reports dr
+       INNER JOIN production_disassembly_lines dl ON dl.disassembly_report_id = dr.id
+       WHERE dl.receipt_document_id = ?`
+    )
+    .get(documentId) as { id: number; taskId: number } | undefined;
+  if (!outputReport) return;
+  const sourceDocument = db
+    .prepare("SELECT status FROM stock_documents WHERE id = (SELECT issue_document_id FROM production_disassembly_reports WHERE id = ?)")
+    .get(outputReport.id) as { status: DocumentStatus } | undefined;
+  const pendingOutputCount = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM production_disassembly_lines dl
+         INNER JOIN stock_documents d ON d.id = dl.receipt_document_id
+         WHERE dl.disassembly_report_id = ?
+           AND dl.receipt_document_id IS NOT NULL
+           AND d.status <> 'posted'`
+      )
+      .get(outputReport.id) as { count: number }
+  ).count;
+  if (sourceDocument?.status !== "posted" || pendingOutputCount > 0) return;
+  db.prepare("UPDATE production_disassembly_reports SET status = 'posted' WHERE id = ?").run(outputReport.id);
+  completeDisassemblyTask(outputReport.taskId);
+}
+
+function assertDisassemblyOutputSourcePosted(documentId: number) {
+  const source = db
+    .prepare(
+      `SELECT source_document.status
+       FROM production_disassembly_lines line
+       INNER JOIN production_disassembly_reports report ON report.id = line.disassembly_report_id
+       INNER JOIN stock_documents source_document ON source_document.id = report.issue_document_id
+       WHERE line.receipt_document_id = ?
+       LIMIT 1`
+    )
+    .get(documentId) as { status: DocumentStatus } | undefined;
+  if (source && source.status !== "posted") {
+    throw requestError("请先完成来源产品出库单的过账，才能办理拆解元器件入库", 409);
+  }
+}
+
+function finalizeAssemblyReportForPostedDocument(documentId: number) {
+  const report = db
+    .prepare(
+      `SELECT ar.id, ar.task_id AS taskId, ar.output_quantity AS outputQuantity,
+              ar.output_document_id AS outputDocumentId, ar.status
+       FROM production_assembly_reports ar
+       WHERE ar.output_document_id = ?
+          OR EXISTS (
+            SELECT 1
+            FROM production_assembly_lines al
+            WHERE al.assembly_report_id = ar.id AND al.issue_document_id = ?
+          )
+       LIMIT 1`
+    )
+    .get(documentId, documentId) as
+    | { id: number; taskId: number; outputQuantity: number; outputDocumentId: number | null; status: "pending" | "posted" }
+    | undefined;
+  if (!report || report.status === "posted") return;
+
+  const pendingIssues = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM production_assembly_lines al
+         INNER JOIN stock_documents d ON d.id = al.issue_document_id
+         WHERE al.assembly_report_id = ? AND d.status <> 'posted'`
+      )
+      .get(report.id) as { count: number }
+  ).count;
+  if (pendingIssues > 0) return;
+
+  if (report.outputDocumentId) {
+    const outputStatus = db
+      .prepare("SELECT status FROM stock_documents WHERE id = ?")
+      .get(report.outputDocumentId) as { status: DocumentStatus } | undefined;
+    if (outputStatus?.status !== "posted") return;
+  }
+  db.prepare("UPDATE production_assembly_reports SET status = 'posted' WHERE id = ?").run(report.id);
+  const task = db
+    .prepare(
+      `SELECT t.id, t.work_order_id AS workOrderId, t.work_order_item_id AS workOrderItemId,
+              t.sequence_no AS sequenceNo, t.planned_quantity AS plannedQuantity,
+              t.input_quantity AS inputQuantity
+       FROM production_tasks t
+       WHERE t.id = ?`
+    )
+    .get(report.taskId) as
+    | {
+        id: number;
+        workOrderId: number;
+        workOrderItemId: number | null;
+        sequenceNo: number;
+        plannedQuantity: number;
+        inputQuantity: number;
+      }
+    | undefined;
+  if (!task) return;
+  if (!report.outputDocumentId) {
+    releaseNextProductionTask(task.workOrderId, task.workOrderItemId, task.sequenceNo, report.outputQuantity);
+    db.prepare(
+      `UPDATE production_tasks
+       SET output_quantity = output_quantity + ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run(report.outputQuantity, task.id);
+  }
+  if (task.inputQuantity >= task.plannedQuantity - QUANTITY_EPSILON) {
+    db.prepare(
+      `UPDATE production_tasks
+       SET status = 'completed', flow_status = 'active', output_document_id = NULL,
+           completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run(task.id);
+  } else {
+    db.prepare(
+      `UPDATE production_tasks
+       SET status = 'in_progress', flow_status = 'active', output_document_id = NULL,
+           completed_at = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).run(task.id);
+  }
+  updateProductionWorkOrderProgress(task.workOrderId);
+}
+
+function assertAssemblyOutputComponentsPosted(documentId: number) {
+  const pendingComponents = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM production_assembly_reports ar
+         INNER JOIN production_assembly_lines al ON al.assembly_report_id = ar.id
+         INNER JOIN stock_documents d ON d.id = al.issue_document_id
+         WHERE ar.output_document_id = ?
+           AND d.status <> 'posted'`
+      )
+      .get(documentId) as { count: number }
+  ).count;
+  if (pendingComponents > 0) {
+    throw requestError("请先完成所有组装元器件领用出库单的过账，才能办理组装产出入库", 409);
+  }
+}
+
 function releaseNextProductionTask(workOrderId: number, workOrderItemId: number | null, sequenceNo: number, quantity: number) {
   const outputQuantity = positiveQuantity(quantity);
   if (outputQuantity <= 0) return;
@@ -488,8 +701,9 @@ function finalizeProductionTaskForPostedDocument(documentId: number) {
         `SELECT t.id, t.work_order_id AS workOrderId, t.work_order_item_id AS workOrderItemId,
                 t.sequence_no AS sequenceNo,
                 t.good_quantity AS goodQuantity, t.output_quantity AS outputQuantity,
-                t.flow_status AS flowStatus
+                t.flow_status AS flowStatus, p.code AS processCode
          FROM production_tasks t
+         INNER JOIN production_processes p ON p.id = t.process_id
          WHERE t.id = ?`
       )
       .get(link.taskId) as
@@ -501,6 +715,7 @@ function finalizeProductionTaskForPostedDocument(documentId: number) {
           goodQuantity: number;
           outputQuantity: number;
           flowStatus: string;
+          processCode: string;
         }
       | undefined;
     const workOrder = task
@@ -519,6 +734,7 @@ function finalizeProductionTaskForPostedDocument(documentId: number) {
        SET status = 'posted', posted_at = CURRENT_TIMESTAMP
        WHERE id = ?`
     ).run(link.id);
+    if (task.processCode === "PROC-ASSEMBLY") continue;
     if (task.outputQuantity < postedQuantity) {
       db.prepare(
         `UPDATE production_tasks
@@ -1376,6 +1592,8 @@ export async function registerInventoryRoutes(
       throw app.httpErrors.forbidden("审批人不能过账本人审批的库存单据", 403);
     }
     if (document.status !== "approved") throw app.httpErrors.conflict("只有已审批单据可以过账");
+    assertDisassemblyOutputSourcePosted(id);
+    assertAssemblyOutputComponentsPosted(id);
     try {
       const post = db.transaction(() => {
         for (const line of document.lines as Array<{
@@ -1413,10 +1631,12 @@ export async function registerInventoryRoutes(
             }
           }
           }
-          finalizeProductionTaskForPostedDocument(id);
           db.prepare(
             "UPDATE stock_documents SET status = 'posted', posted_by = ?, posted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-        ).run(request.user.id, id);
+          ).run(request.user.id, id);
+          finalizeProductionTaskForPostedDocument(id);
+          finalizeDisassemblyReportForPostedDocument(id);
+          finalizeAssemblyReportForPostedDocument(id);
       });
       post();
     } catch (error) {

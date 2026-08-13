@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Check, ClipboardCheck, Download, Eye, FilePlus2, Play, Printer, RefreshCw, Search, ShieldAlert, X } from "lucide-react";
 import { Department, User, request } from "./api";
 import { downloadProductionTask, printProductionTask, ProductionTaskDetail, ProductionTaskDetailModal } from "./ProductionPage";
+import { DisassemblyReportModal } from "./DisassemblyReportModal";
+import { AssemblyReportModal } from "./AssemblyReportModal";
 import {
   createDefaultOperationData,
   getOperationRows,
@@ -20,6 +22,8 @@ import {
 
 export type ProductionStationKey =
   | "bga"
+  | "disassembly"
+  | "assembly"
   | "chip-initial-test"
   | "outsource"
   | "chip-retest"
@@ -45,6 +49,7 @@ type ProductionTask = {
   terminationType: WorkOrderTerminationType;
   productItemCode: string;
   productItemName: string;
+  productTrackingMode: "none" | "lot" | "serial";
   itemRouteName: string | null;
   processCode: string;
   processName: string;
@@ -118,6 +123,18 @@ const stations: Record<ProductionStationKey, StationDefinition> = {
     processCode: "PROC-BGA",
     title: "芯片拆卸植球",
     description: "处理本工位已派发任务，并提交拆卸、植球等前处理的实际报工。",
+    qualityGate: false
+  },
+  disassembly: {
+    processCode: "PROC-DISASSEMBLY",
+    title: "生产拆解",
+    description: "处理生产拆解任务，并按现有工单、派工、报工和流转规则记录现场作业。",
+    qualityGate: false
+  },
+  assembly: {
+    processCode: "PROC-ASSEMBLY",
+    title: "生产组装",
+    description: "处理生产组装任务，并按现有工单、派工、报工和流转规则记录现场作业。",
     qualityGate: false
   },
   "chip-initial-test": {
@@ -304,7 +321,11 @@ function StationTasksPanel({ currentUser, station }: { currentUser: User; statio
         })}
         {!filtered.length && <EmptyTable colSpan={8} title="暂无本工位任务" description="本工位暂无已派发任务，或当前账号无可查看的数据范围。" />}
       </tbody></table></div>
-      {reporting && <StationReportModal task={reporting} onClose={() => setReporting(null)} onSaved={() => { setReporting(null); void load(); }} />}
+      {reporting && (station.processCode === "PROC-DISASSEMBLY"
+        ? <DisassemblyReportModal task={reporting} onClose={() => setReporting(null)} onSaved={() => { setReporting(null); void load(); }} />
+        : station.processCode === "PROC-ASSEMBLY"
+          ? <AssemblyReportModal task={reporting} onClose={() => setReporting(null)} onSaved={() => { setReporting(null); void load(); }} />
+          : <StationReportModal task={reporting} onClose={() => setReporting(null)} onSaved={() => { setReporting(null); void load(); }} />)}
       {detail && <ProductionTaskDetailModal detail={detail} onClose={() => setDetail(null)} onPrint={() => { printProductionTask(detail); void recordTaskOutput(detail.item.id, "print"); }} onDownload={() => { downloadProductionTask(detail); void recordTaskOutput(detail.item.id, "download"); }} />}
       {showWorkOrderForm && <StationWorkOrderForm station={station} onClose={() => setShowWorkOrderForm(false)} onSaved={() => { setShowWorkOrderForm(false); void load(); }} />}
     </section>

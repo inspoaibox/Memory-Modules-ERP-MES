@@ -20,6 +20,8 @@ import {
   X
 } from "lucide-react";
 import { Department, User, request } from "./api";
+import { DisassemblyReportModal } from "./DisassemblyReportModal";
+import { AssemblyReportModal } from "./AssemblyReportModal";
 import {
   createDefaultOperationData,
   formatOperationValue,
@@ -174,6 +176,7 @@ type ProductionTask = {
   terminationType: WorkOrderTerminationType;
   productItemCode: string;
   productItemName: string;
+  productTrackingMode: "none" | "lot" | "serial";
   itemRouteName: string | null;
   processId: number;
   processCode: string;
@@ -261,6 +264,36 @@ export type ProductionTaskDetail = {
     linkType: string;
     linkStatus: string;
     postedAt: string | null;
+  }>;
+  disassemblyLines: Array<{
+    reportNo: string;
+    lineNo: number;
+    itemCode: string;
+    itemName: string;
+    quantity: number;
+    destinationType: "warehouse" | "process";
+    warehouseName: string | null;
+    routeName: string | null;
+    startProcessName: string | null;
+    receiptDocumentNo: string | null;
+    childWorkOrderNo: string | null;
+    lotNo: string;
+    serialNo: string;
+    remark: string;
+  }>;
+  assemblyLines: Array<{
+    reportNo: string;
+    lineNo: number;
+    itemCode: string;
+    itemName: string;
+    unitQuantity: number;
+    quantity: number;
+    warehouseCode: string;
+    warehouseName: string;
+    lotNo: string;
+    serialNo: string;
+    issueDocumentNo: string;
+    remark: string;
   }>;
 };
 
@@ -660,7 +693,11 @@ function TasksPanel({ currentUser }: { currentUser: User }) {
         </table>
       </div>
       {assigning && <AssignTaskModal task={assigning} onClose={() => setAssigning(null)} onSaved={() => { setAssigning(null); void load(); }} />}
-      {reporting && <ReportTaskModal task={reporting} onClose={() => setReporting(null)} onSaved={() => { setReporting(null); void load(); }} />}
+      {reporting && (reporting.processCode === "PROC-DISASSEMBLY"
+        ? <DisassemblyReportModal task={reporting} onClose={() => setReporting(null)} onSaved={() => { setReporting(null); void load(); }} />
+        : reporting.processCode === "PROC-ASSEMBLY"
+          ? <AssemblyReportModal task={reporting} onClose={() => setReporting(null)} onSaved={() => { setReporting(null); void load(); }} />
+          : <ReportTaskModal task={reporting} onClose={() => setReporting(null)} onSaved={() => { setReporting(null); void load(); }} />)}
       {detail && <ProductionTaskDetailModal detail={detail} onClose={() => setDetail(null)} onPrint={() => { printProductionTask(detail); void recordTaskOutput(detail.item.id, "print"); }} onDownload={() => { downloadProductionTask(detail); void recordTaskOutput(detail.item.id, "download"); }} />}
     </section>
   );
@@ -684,8 +721,10 @@ export function ProductionTaskDetailModal({ detail, onClose, onPrint, onDownload
          <div className="document-detail-meta"><span>已投入：<strong>{formatQuantity(task.inputQuantity)}</strong></span><span>合格：<strong>{formatQuantity(task.goodQuantity)}</strong></span><span>已流转：<strong>{formatQuantity(task.outputQuantity)}</strong></span><span>不良：<strong>{formatQuantity(task.defectQuantity)}</strong></span><span>执行人：<strong>{task.assignedUserName || "-"}</strong></span><span>执行部门：<strong>{task.assignedDepartmentName || "-"}</strong></span></div>
         <TaskReportsDetail reports={detail.reports} template={template} />
          <TaskRepairsDetail repairs={detail.repairs} />
-         <TaskRepairOperationsDetail operations={detail.repairOperations} />
-         <TaskQualityDetail qualityChecks={detail.qualityChecks} />
+        <TaskRepairOperationsDetail operations={detail.repairOperations} />
+        <TaskQualityDetail qualityChecks={detail.qualityChecks} />
+        <TaskDisassemblyDetail lines={detail.disassemblyLines} />
+        <TaskAssemblyDetail lines={detail.assemblyLines} />
         <TaskInventoryDetail documents={detail.inventoryDocuments} />
       </div>
     </SimpleModal>
@@ -716,9 +755,26 @@ function TaskQualityDetail({ qualityChecks }: { qualityChecks: ProductionTaskDet
   return <div className="table-wrap"><table><thead><tr><th>质检单</th><th>待检</th><th>合格 / 不合格</th><th>状态</th><th>结论</th></tr></thead><tbody>{qualityChecks.map((check) => <tr key={check.id}><td><strong>{check.checkNo}</strong><small>{check.inspectorName || "-"}</small></td><td className="quantity-cell">{formatQuantity(check.quantity)}</td><td><strong>{formatQuantity(check.passedQuantity)}</strong><small>不合格 {formatQuantity(check.failedQuantity)}</small></td><td><QualityStatusBadge status={check.status} /></td><td>{check.checkResult || "-"}</td></tr>)}</tbody></table></div>;
 }
 
+function TaskDisassemblyDetail({ lines }: { lines: ProductionTaskDetail["disassemblyLines"] }) {
+  if (!lines.length) return null;
+  return <div className="table-wrap"><table className="production-table task-flow-detail-table task-flow-disassembly-table"><thead><tr><th>拆解报工</th><th>元器件</th><th>数量</th><th>去向</th><th>目标</th><th>批次 / 序列号</th><th>备注</th></tr></thead><tbody>{lines.map((line) => <tr key={`${line.reportNo}-${line.lineNo}`}><td><strong>{line.reportNo}</strong><small>第 {line.lineNo} 行</small></td><td><strong>{line.itemName}</strong><small className="code-cell">{line.itemCode}</small></td><td className="quantity-positive">{formatQuantity(line.quantity)}</td><td>{line.destinationType === "warehouse" ? "进入仓库" : "进入后续工序"}</td><td>{line.destinationType === "warehouse" ? <><strong>{line.warehouseName || "-"}</strong><small>{line.receiptDocumentNo || "待生成入库单"}</small></> : <><strong>{line.startProcessName || "-"}</strong><small>{line.routeName || "-"} · {line.childWorkOrderNo || "待生成工单"}</small></>}</td><td>{line.serialNo || line.lotNo || "-"}</td><td>{line.remark || "-"}</td></tr>)}</tbody></table></div>;
+}
+
+function TaskAssemblyDetail({ lines }: { lines: ProductionTaskDetail["assemblyLines"] }) {
+  if (!lines.length) return null;
+  return <div className="table-wrap"><table className="production-table task-flow-detail-table task-flow-assembly-table"><thead><tr><th>组装报工</th><th>元器件</th><th>来源仓库</th><th>单件用量</th><th>实际领用</th><th>批次 / 序列号</th><th>领用出库单</th><th>备注</th></tr></thead><tbody>{lines.map((line) => <tr key={`${line.reportNo}-${line.lineNo}`}><td><strong>{line.reportNo}</strong><small>第 {line.lineNo} 行</small></td><td><strong>{line.itemName}</strong><small className="code-cell">{line.itemCode}</small></td><td><strong>{line.warehouseName}</strong><small className="code-cell">{line.warehouseCode}</small></td><td className="quantity-cell">{formatQuantity(line.unitQuantity)}</td><td className="quantity-negative">{formatQuantity(line.quantity)}</td><td>{line.serialNo || line.lotNo || "-"}</td><td>{line.issueDocumentNo}</td><td>{line.remark || "-"}</td></tr>)}</tbody></table></div>;
+}
+
 function TaskInventoryDetail({ documents }: { documents: ProductionTaskDetail["inventoryDocuments"] }) {
   if (!documents.length) return null;
-  return <div className="table-wrap"><table><thead><tr><th>关联入库单</th><th>类型</th><th>业务日期</th><th>单据状态</th><th>关联状态</th></tr></thead><tbody>{documents.map((document) => <tr key={document.id}><td><strong>{document.documentNo}</strong></td><td>{document.linkType === "finished_goods_receipt" ? "成品入库" : "半成品入库"}</td><td>{document.businessDate}</td><td>{document.status}</td><td>{document.linkStatus}</td></tr>)}</tbody></table></div>;
+  const linkTypeLabel: Record<string, string> = {
+    finished_goods_receipt: "成品入库",
+    semi_finished_receipt: "半成品入库",
+    disassembly_source_issue: "拆解来源出库",
+    disassembly_component_receipt: "拆解元器件入库",
+    assembly_component_issue: "组装元器件领用出库"
+  };
+  return <div className="table-wrap"><table><thead><tr><th>关联库存单</th><th>类型</th><th>业务日期</th><th>单据状态</th><th>关联状态</th></tr></thead><tbody>{documents.map((document) => <tr key={`${document.linkType}-${document.id}`}><td><strong>{document.documentNo}</strong></td><td>{linkTypeLabel[document.linkType] || document.linkType}</td><td>{document.businessDate}</td><td>{document.status}</td><td>{document.linkStatus}</td></tr>)}</tbody></table></div>;
 }
 
 function ReportsPanel() {
@@ -932,6 +988,34 @@ export function downloadProductionTask(detail: ProductionTaskDetail) {
   const task = detail.item;
   const template = getOperationTemplate(task.processCode, task.processName, task.processType);
   const fields = template.fields;
+  const disassemblyRows = detail.disassemblyLines.map((line) => [
+    line.reportNo,
+    line.lineNo,
+    line.itemCode,
+    line.itemName,
+    formatQuantity(line.quantity),
+    line.destinationType === "warehouse" ? "进入仓库" : "进入后续工序",
+    line.destinationType === "warehouse" ? line.warehouseName || "" : line.routeName || "",
+    line.destinationType === "warehouse" ? line.receiptDocumentNo || "" : line.startProcessName || "",
+    line.destinationType === "process" ? line.childWorkOrderNo || "" : "",
+    line.lotNo,
+    line.serialNo,
+    line.remark
+  ]);
+  const assemblyRows = detail.assemblyLines.map((line) => [
+    line.reportNo,
+    line.lineNo,
+    line.itemCode,
+    line.itemName,
+    line.warehouseCode,
+    line.warehouseName,
+    formatQuantity(line.unitQuantity),
+    formatQuantity(line.quantity),
+    line.lotNo,
+    line.serialNo,
+    line.issueDocumentNo,
+    line.remark
+  ]);
   const reportHeaders = template.layout === "table"
     ? ["报工单", "报工日期", "报工人", "批次号", "序列号", ...fields.map((field) => field.label), "报工备注"]
     : ["报工单", "报工日期", "报工人", "投入", "合格", "不良", "批次号", "序列号", ...fields.map((field) => field.label), "备注"];
@@ -977,6 +1061,12 @@ export function downloadProductionTask(detail: ProductionTaskDetail) {
     [],
     reportHeaders,
     ...reportRows,
+    [],
+    ["拆解报工单", "行号", "元器件编码", "元器件名称", "数量", "去向", "目标仓库 / 路线", "入库单 / 起始工序", "后续工单", "批次号", "序列号", "备注"],
+    ...disassemblyRows,
+    [],
+    ["组装报工单", "行号", "元器件编码", "元器件名称", "来源仓库编码", "来源仓库", "单件用量", "实际领用", "批次号", "序列号", "领用出库单", "备注"],
+    ...assemblyRows,
     [],
     ["维修单", "来源不良", "商品规格", "芯片型号", "芯片规格", "维修合格", "仍不良", "维修报废", "报废原因", "状态"],
     ...detail.repairs.map((repair) => [repair.repairNo, formatQuantity(repair.quantity), repair.itemSpecification, repair.chipModel || repair.chipName, repair.chipSpec, formatQuantity(repair.repairGoodQuantity), formatQuantity(repair.repairDefectQuantity), formatQuantity(repair.scrapQuantity), repair.scrapReason, repairStatusLabels[repair.status]]),
@@ -1043,6 +1133,8 @@ function buildProductionTaskPrintHtml(detail: ProductionTaskDetail) {
       return `<tr><td><strong>${escapeHtml(report.reportNo)}</strong><br /><span>${escapeHtml(report.reportDate)}</span></td><td>${escapeHtml(report.operatorName)}</td><td>${escapeHtml(formatQuantity(report.inputQuantity))}</td><td>${escapeHtml(formatQuantity(report.goodQuantity))}</td><td>${escapeHtml(formatQuantity(report.defectQuantity))}</td><td>${operationRows || "-"}</td></tr>`;
     }).join("");
   const repairRows = detail.repairs.map((repair) => `<tr><td>${escapeHtml(repair.repairNo)}</td><td>${escapeHtml(formatQuantity(repair.quantity))}</td><td>${escapeHtml(formatQuantity(repair.repairGoodQuantity))}</td><td>${escapeHtml(formatQuantity(repair.repairDefectQuantity))}</td><td>${escapeHtml(formatQuantity(repair.scrapQuantity))}</td><td>${escapeHtml(repair.scrapReason || "-")}</td><td>${escapeHtml(repairStatusLabels[repair.status])}</td></tr>`).join("");
+  const disassemblyRows = detail.disassemblyLines.map((line) => `<tr><td>${escapeHtml(line.reportNo)}</td><td>${escapeHtml(line.itemCode)}<br /><span>${escapeHtml(line.itemName)}</span></td><td>${escapeHtml(formatQuantity(line.quantity))}</td><td>${escapeHtml(line.destinationType === "warehouse" ? "进入仓库" : "进入后续工序")}</td><td>${escapeHtml(line.destinationType === "warehouse" ? line.warehouseName || "-" : line.startProcessName || "-")}</td><td>${escapeHtml(line.destinationType === "warehouse" ? line.receiptDocumentNo || "-" : `${line.routeName || "-"} · ${line.childWorkOrderNo || "-"}`)}</td><td>${escapeHtml(line.serialNo || line.lotNo || "-")}</td><td>${escapeHtml(line.remark || "-")}</td></tr>`).join("");
+  const assemblyRows = detail.assemblyLines.map((line) => `<tr><td>${escapeHtml(line.reportNo)}</td><td>${escapeHtml(line.itemCode)}<br /><span>${escapeHtml(line.itemName)}</span></td><td>${escapeHtml(line.warehouseCode)} · ${escapeHtml(line.warehouseName)}</td><td>${escapeHtml(formatQuantity(line.unitQuantity))}</td><td>${escapeHtml(formatQuantity(line.quantity))}</td><td>${escapeHtml(line.serialNo || line.lotNo || "-")}</td><td>${escapeHtml(line.issueDocumentNo)}</td><td>${escapeHtml(line.remark || "-")}</td></tr>`).join("");
   const repairOperationRows = detail.repairOperations.map((operation) => `<tr><td>${escapeHtml(operation.repairNo)}</td><td>${escapeHtml(formatDateTime(operation.createdAt))}</td><td>${escapeHtml(formatQuantity(operation.repairGoodQuantity))}</td><td>${escapeHtml(formatQuantity(operation.repairDefectQuantity))}</td><td>${escapeHtml(formatQuantity(operation.scrapQuantity))}</td><td>${escapeHtml(operation.scrapReason || "-")}</td><td>${escapeHtml(operation.operatorName)}</td></tr>`).join("");
   return `<!doctype html>
 <html lang="zh-CN">
@@ -1078,6 +1170,8 @@ function buildProductionTaskPrintHtml(detail: ProductionTaskDetail) {
       <div><span>执行员工</span><strong>${escapeHtml(task.assignedUserName || "-")}</strong></div>
     </section>
     <table><thead><tr>${reportHeaderCells.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead><tbody>${reportRows || `<tr><td colspan="${reportHeaderCells.length}">暂无报工记录</td></tr>`}</tbody></table>
+    ${disassemblyRows ? `<table><thead><tr><th>拆解报工</th><th>元器件</th><th>数量</th><th>去向</th><th>目标</th><th>入库单 / 后续工单</th><th>批次 / 序列号</th><th>备注</th></tr></thead><tbody>${disassemblyRows}</tbody></table>` : ""}
+    ${assemblyRows ? `<table><thead><tr><th>组装报工</th><th>元器件</th><th>来源仓库</th><th>单件用量</th><th>实际领用</th><th>批次 / 序列号</th><th>领用出库单</th><th>备注</th></tr></thead><tbody>${assemblyRows}</tbody></table>` : ""}
     ${repairRows ? `<table><thead><tr><th>维修单</th><th>来源不良</th><th>维修合格</th><th>仍不良</th><th>维修报废</th><th>报废原因</th><th>状态</th></tr></thead><tbody>${repairRows}</tbody></table>` : ""}
     ${repairOperationRows ? `<table><thead><tr><th>维修单</th><th>处理时间</th><th>维修合格</th><th>仍不良</th><th>维修报废</th><th>报废原因</th><th>维修人</th></tr></thead><tbody>${repairOperationRows}</tbody></table>` : ""}
     <footer><span>打印时间：${escapeHtml(formatDateTime(new Date().toISOString()))}</span><span>本任务单由系统自动生成</span></footer>

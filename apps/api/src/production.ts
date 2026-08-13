@@ -295,6 +295,93 @@ function getWarehouse(id: number) {
     .get(id) as WarehouseRow | undefined;
 }
 
+function getWarehouseBalance(itemId: number, warehouseId: number, lotNo = "", serialNo = "") {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(quantity_delta), 0) AS quantity
+       FROM stock_ledger_entries
+       WHERE item_id = ? AND warehouse_id = ? AND lot_no = ? AND serial_no = ?`
+    )
+    .get(itemId, warehouseId, lotNo, serialNo) as { quantity: number };
+  return Number(row.quantity);
+}
+
+function canOperateWarehouse(userId: number, warehouse: WarehouseRow) {
+  return isSystemAdmin(userId) || canAccessDepartment(userId, warehouse.departmentId);
+}
+
+function getDisassemblyWarehouses(userId: number) {
+  return (
+    db
+      .prepare(
+        `SELECT id, code, name, department_id AS departmentId,
+                warehouse_type AS warehouseType, status
+         FROM warehouses
+         WHERE status = 'active'
+         ORDER BY id`
+      )
+      .all() as WarehouseRow[]
+  ).filter((warehouse) => canOperateWarehouse(userId, warehouse));
+}
+
+function getAssemblyWarehouses(userId: number) {
+  return getDisassemblyWarehouses(userId);
+}
+
+function getDisassemblyProcesses(userId: number) {
+  return db
+    .prepare(
+      `SELECT id, code, name, process_type AS processType, status
+       FROM production_processes
+       WHERE status = 'active'
+       ORDER BY sort_order, id`
+    )
+    .all()
+    .filter((process) => isUserAuthorizedForProcess(userId, (process as ProcessRow).id)) as ProcessRow[];
+}
+
+function createDisassemblyStockDocument(
+  documentType: "issue" | "receipt",
+  warehouse: WarehouseRow,
+  referenceNo: string,
+  reason: string,
+  remark: string,
+  createdBy: number,
+  lines: Array<{ itemId: number; quantity: number; lotNo: string; serialNo: string; remark: string }>
+) {
+  if (!lines.length && documentType === "issue") {
+    throw businessError("拆解来源出库单不能没有商品明细", 409);
+  }
+  const result = db
+    .prepare(
+      `INSERT INTO stock_documents
+       (document_no, document_type, business_date, department_id, warehouse_id,
+        reference_no, reason, remark, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      nextDailyCode(documentType === "issue" ? "OUT" : "IN", "stock_documents", "document_no"),
+      documentType,
+      today(),
+      warehouse.departmentId,
+      warehouse.id,
+      referenceNo,
+      reason,
+      remark,
+      createdBy
+    );
+  const documentId = Number(result.lastInsertRowid);
+  const insertLine = db.prepare(
+    `INSERT INTO stock_document_lines
+     (document_id, line_no, item_id, quantity, lot_no, serial_no, remark)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+  lines.forEach((line, index) => {
+    insertLine.run(documentId, index + 1, line.itemId, line.quantity, line.lotNo, line.serialNo, line.remark);
+  });
+  return documentId;
+}
+
 function ensureProductionOutputWarehouse(outputTarget: "semi_finished" | "finished_goods", warehouse: WarehouseRow, label = "输出仓库") {
   const expectedType = outputTarget === "semi_finished" ? "semi_finished" : "finished_goods";
   if (warehouse.warehouseType !== expectedType) {
@@ -1286,6 +1373,39 @@ type WorkOrderCreateInput = {
   remark?: string;
 };
 
+type DisassemblyDestinationType = "warehouse" | "process";
+
+type DisassemblyLineInput = {
+  itemId?: number;
+  quantity?: number;
+  destinationType?: DisassemblyDestinationType;
+  warehouseId?: number | null;
+  routeId?: number | null;
+  startProcessId?: number | null;
+  lotNo?: string;
+  serialNo?: string;
+  remark?: string;
+};
+
+type AssemblyLineInput = {
+  itemId?: number;
+  sourceWarehouseId?: number;
+  unitQuantity?: number;
+  lotNo?: string;
+  serialNo?: string;
+  remark?: string;
+};
+
+type DisassemblyReportInput = {
+  reportDate?: string;
+  sourceWarehouseId?: number;
+  sourceQuantity?: number;
+  sourceLotNo?: string;
+  sourceSerialNo?: string;
+  lines?: DisassemblyLineInput[];
+  remark?: string;
+};
+
 type NormalizedWorkOrderItem = {
   productItemId: number;
   productItemCode: string;
@@ -1348,6 +1468,170 @@ function normalizeWorkOrderItems(body: WorkOrderCreateInput, startProcess: Proce
       remark: line.remark?.trim() ?? ""
     };
   });
+}
+
+function validateDisassemblyLine(
+  actorUserId: number,
+  line: DisassemblyLineInput,
+  index: number
+) {
+  const itemId = parseId(line.itemId, `第 ${index + 1} 行元器件`);
+  const item = getItem(itemId);
+  if (!item || item.status !== "active") throw businessError(`第 ${index + 1} 行元器件不存在或已停用`);
+  const quantity = parseQuantity(line.quantity, `第 ${index + 1} 行拆解数量`);
+  const destinationType = line.destinationType;
+  if (destinationType !== "warehouse" && destinationType !== "process") {
+    throw businessError(`第 ${index + 1} 行去向不合法`);
+  }
+  const lotNo = line.lotNo?.trim() ?? "";
+  const serialNo = line.serialNo?.trim() ?? "";
+  if (item.trackingMode === "lot" && !lotNo) {
+    throw businessError(`${item.name}按批次管理，第 ${index + 1} 行必须填写批次号`);
+  }
+  if (item.trackingMode === "serial" && (!serialNo || quantity !== 1)) {
+    throw businessError(`${item.name}按序列号管理时，每行数量必须为 1 且填写序列号`);
+  }
+  const remark = line.remark?.trim() ?? "";
+  if (destinationType === "warehouse") {
+    const warehouseId = parseId(line.warehouseId, `第 ${index + 1} 行目标仓库`);
+    const warehouse = getWarehouse(warehouseId);
+    if (!warehouse || warehouse.status !== "active") throw businessError(`第 ${index + 1} 行目标仓库不存在或已停用`);
+    if (!canOperateWarehouse(actorUserId, warehouse)) throw businessError(`当前账号没有第 ${index + 1} 行目标仓库的数据范围`, 403);
+    return {
+      itemId,
+      item,
+      quantity,
+      destinationType,
+      warehouseId,
+      routeId: null,
+      startProcessId: null,
+      lotNo,
+      serialNo,
+      remark
+    };
+  }
+  const routeId = parseId(line.routeId, `第 ${index + 1} 行后续工艺路线`);
+  const startProcessId = parseId(line.startProcessId, `第 ${index + 1} 行后续工序`);
+  const route = getRoute(routeId);
+  if (!route || route.status !== "active") throw businessError(`第 ${index + 1} 行后续工艺路线不存在或已停用`);
+  if (route.productItemId !== null && route.productItemId !== itemId) {
+    throw businessError(`第 ${index + 1} 行工艺路线不适用于元器件 ${item.name}`);
+  }
+  const process = getProcess(startProcessId);
+  if (!process || process.status !== "active") throw businessError(`第 ${index + 1} 行后续工序不存在或已停用`);
+  if (!isUserAuthorizedForProcess(actorUserId, startProcessId)) {
+    throw businessError(`当前账号没有第 ${index + 1} 行后续工序的执行授权`, 403);
+  }
+  if (!getRouteSteps(routeId).some((step) => step.processId === startProcessId)) {
+    throw businessError(`第 ${index + 1} 行工艺路线不包含所选后续工序`);
+  }
+  return {
+    itemId,
+    item,
+    quantity,
+    destinationType,
+    warehouseId: null,
+    routeId,
+    startProcessId,
+    lotNo,
+    serialNo,
+    remark
+  };
+}
+
+function validateAssemblyLine(
+  actorUserId: number,
+  line: AssemblyLineInput,
+  assemblyQuantity: number,
+  index: number
+) {
+  const itemId = parseId(line.itemId, `第 ${index + 1} 行组装元器件`);
+  const item = getItem(itemId);
+  if (!item || item.status !== "active") throw businessError(`第 ${index + 1} 行组装元器件不存在或已停用`);
+  const sourceWarehouseId = parseId(line.sourceWarehouseId, `第 ${index + 1} 行来源仓库`);
+  const sourceWarehouse = getWarehouse(sourceWarehouseId);
+  if (!sourceWarehouse || sourceWarehouse.status !== "active") {
+    throw businessError(`第 ${index + 1} 行来源仓库不存在或已停用`);
+  }
+  if (!canOperateWarehouse(actorUserId, sourceWarehouse)) {
+    throw businessError(`当前账号没有第 ${index + 1} 行来源仓库的数据范围`, 403);
+  }
+  const unitQuantity = parseQuantity(line.unitQuantity, `第 ${index + 1} 行单件用量`);
+  const quantity = unitQuantity * assemblyQuantity;
+  const lotNo = line.lotNo?.trim() ?? "";
+  const serialNo = line.serialNo?.trim() ?? "";
+  if (item.trackingMode === "lot" && !lotNo) {
+    throw businessError(`${item.name}按批次管理，第 ${index + 1} 行必须填写批次号`);
+  }
+  if (item.trackingMode === "serial" && (assemblyQuantity !== 1 || quantity !== 1 || !serialNo)) {
+    throw businessError(`${item.name}按序列号管理时，当前暂按一行一个序列号处理，组装数量必须为 1 且填写序列号`);
+  }
+  return {
+    itemId,
+    item,
+    sourceWarehouseId,
+    sourceWarehouse,
+    unitQuantity,
+    quantity,
+    lotNo,
+    serialNo,
+    remark: line.remark?.trim() ?? ""
+  };
+}
+
+function assertAssemblyLineBalances(
+  lines: Array<ReturnType<typeof validateAssemblyLine>>
+) {
+  const requested = new Map<string, { itemId: number; warehouseId: number; lotNo: string; serialNo: string; quantity: number; itemName: string }>();
+  for (const line of lines) {
+    const key = JSON.stringify([line.itemId, line.sourceWarehouseId, line.lotNo, line.serialNo]);
+    const current = requested.get(key);
+    requested.set(key, {
+      itemId: line.itemId,
+      warehouseId: line.sourceWarehouseId,
+      lotNo: line.lotNo,
+      serialNo: line.serialNo,
+      quantity: (current?.quantity ?? 0) + line.quantity,
+      itemName: line.item.name
+    });
+  }
+  for (const line of requested.values()) {
+    const balance = getWarehouseBalance(line.itemId, line.warehouseId, line.lotNo, line.serialNo);
+    if (balance < line.quantity - QUANTITY_EPSILON) {
+      throw businessError(`组装元器件库存不足，商品 ${line.itemName} 可用库存为 ${balance}，需要领用 ${line.quantity}，禁止负库存`, 409);
+    }
+  }
+}
+
+function createDisassemblyChildWorkOrder(
+  task: TaskRow,
+  line: ReturnType<typeof validateDisassemblyLine>,
+  actorUserId: number
+) {
+  if (line.destinationType !== "process" || !line.routeId || !line.startProcessId) return null;
+  const normalizedItem: NormalizedWorkOrderItem = {
+    productItemId: line.itemId,
+    productItemCode: line.item.itemCode,
+    routeId: line.routeId,
+    plannedQuantity: line.quantity,
+    remark: line.remark
+  };
+  const childId = insertWorkOrderRecord(
+    {
+      priority: "normal",
+      plannedStartDate: today(),
+      plannedEndDate: "",
+      remark: `来源拆解任务 ${task.taskNo}${line.remark ? `；${line.remark}` : ""}`
+    },
+    { departmentId: task.workOrderDepartmentId, managerUserId: null },
+    [normalizedItem],
+    actorUserId,
+    line.startProcessId
+  );
+  const child = getWorkOrder(childId);
+  if (!child) throw businessError("拆解后续工单创建失败", 500);
+  generateWorkOrderTasks(child);
+  return childId;
 }
 
 function insertWorkOrderRecord(
@@ -2286,7 +2570,8 @@ export async function registerProductionRoutes(
           `SELECT t.id, t.task_no AS taskNo, t.work_order_id AS workOrderId,
                   t.work_order_item_id AS workOrderItemId, COALESCE(woi.line_no, 1) AS workOrderItemLineNo,
                   wo.work_order_no AS workOrderNo, i.item_code AS productItemCode,
-                  i.name AS productItemName, item_route.name AS itemRouteName, t.process_id AS processId,
+                  i.name AS productItemName, i.tracking_mode AS productTrackingMode,
+                  item_route.name AS itemRouteName, t.process_id AS processId,
                   p.code AS processCode, p.name AS processName, p.process_type AS processType,
                   wo.execution_status AS executionStatus, wo.termination_type AS terminationType,
                   t.sequence_no AS sequenceNo, t.assigned_department_id AS assignedDepartmentId,
@@ -2312,6 +2597,73 @@ export async function registerProductionRoutes(
            ORDER BY t.id DESC`
         )
         .all(...params)
+    };
+  });
+
+  app.get("/api/production/disassembly-options", { preHandler: requirePermission("production.tasks.view") }, async (request) => ({
+    items: db
+      .prepare(
+        `SELECT id, item_code AS itemCode, name, tracking_mode AS trackingMode, status
+         FROM items
+         WHERE status = 'active'
+         ORDER BY item_code, id`
+      )
+      .all(),
+    warehouses: getDisassemblyWarehouses(request.user.id),
+    balances: (() => {
+      const warehouses = getDisassemblyWarehouses(request.user.id);
+      if (!warehouses.length) return [];
+      return db
+        .prepare(
+          `SELECT l.item_id AS itemId, l.warehouse_id AS warehouseId,
+                  l.lot_no AS lotNo, l.serial_no AS serialNo,
+                  SUM(l.quantity_delta) AS quantity
+           FROM stock_ledger_entries l
+           WHERE l.warehouse_id IN (${warehouses.map(() => "?").join(",")})
+           GROUP BY l.item_id, l.warehouse_id, l.lot_no, l.serial_no
+           HAVING SUM(l.quantity_delta) > 0
+           ORDER BY l.item_id, l.warehouse_id, l.lot_no, l.serial_no`
+        )
+        .all(...warehouses.map((warehouse) => warehouse.id));
+    })(),
+    processes: getDisassemblyProcesses(request.user.id),
+    routes: db
+      .prepare(
+        `SELECT id, code, name, product_item_id AS productItemId, status
+         FROM production_routes
+         WHERE status = 'active'
+         ORDER BY code, id`
+      )
+      .all()
+  }));
+
+  app.get("/api/production/assembly-options", { preHandler: requirePermission("production.tasks.view") }, async (request) => {
+    const warehouses = getAssemblyWarehouses(request.user.id);
+    const warehouseIds = warehouses.map((warehouse) => warehouse.id);
+    return {
+      items: db
+        .prepare(
+          `SELECT id, item_code AS itemCode, name, tracking_mode AS trackingMode, status
+           FROM items
+           WHERE status = 'active'
+           ORDER BY item_code, id`
+        )
+        .all(),
+      warehouses,
+      balances: warehouseIds.length
+        ? db
+            .prepare(
+              `SELECT l.item_id AS itemId, l.warehouse_id AS warehouseId,
+                      l.lot_no AS lotNo, l.serial_no AS serialNo,
+                      SUM(l.quantity_delta) AS quantity
+               FROM stock_ledger_entries l
+               WHERE l.warehouse_id IN (${warehouseIds.map(() => "?").join(",")})
+               GROUP BY l.item_id, l.warehouse_id, l.lot_no, l.serial_no
+               HAVING SUM(l.quantity_delta) > 0
+               ORDER BY l.item_id, l.warehouse_id, l.lot_no, l.serial_no`
+            )
+            .all(...warehouseIds)
+        : []
     };
   });
 
@@ -2384,7 +2736,71 @@ export async function registerProductionRoutes(
          FROM production_inventory_links l
          INNER JOIN stock_documents d ON d.id = l.document_id
          WHERE l.task_id = ?
-         ORDER BY l.id`
+         UNION ALL
+         SELECT d.id, d.document_no AS documentNo, d.document_type AS documentType,
+                d.status, d.business_date AS businessDate,
+                'disassembly_source_issue' AS linkType,
+                dr.status AS linkStatus, NULL AS postedAt
+         FROM production_disassembly_reports dr
+         INNER JOIN stock_documents d ON d.id = dr.issue_document_id
+         WHERE dr.task_id = ?
+         UNION ALL
+         SELECT DISTINCT d.id, d.document_no AS documentNo, d.document_type AS documentType,
+                d.status, d.business_date AS businessDate,
+                'disassembly_component_receipt' AS linkType,
+                dr.status AS linkStatus, NULL AS postedAt
+         FROM production_disassembly_reports dr
+         INNER JOIN production_disassembly_lines dl ON dl.disassembly_report_id = dr.id
+         INNER JOIN stock_documents d ON d.id = dl.receipt_document_id
+         WHERE dr.task_id = ?
+         UNION ALL
+         SELECT DISTINCT d.id, d.document_no AS documentNo, d.document_type AS documentType,
+                d.status, d.business_date AS businessDate,
+                'assembly_component_issue' AS linkType,
+                ar.status AS linkStatus, NULL AS postedAt
+         FROM production_assembly_reports ar
+         INNER JOIN production_assembly_lines al ON al.assembly_report_id = ar.id
+         INNER JOIN stock_documents d ON d.id = al.issue_document_id
+         WHERE ar.task_id = ?
+         ORDER BY documentNo`
+      )
+      .all(id, id, id, id);
+    const disassemblyLines = db
+      .prepare(
+        `SELECT pr.report_no AS reportNo, dl.line_no AS lineNo, i.item_code AS itemCode,
+                i.name AS itemName, dl.quantity, dl.destination_type AS destinationType,
+                w.name AS warehouseName, r.name AS routeName, p.name AS startProcessName,
+                receipt.document_no AS receiptDocumentNo,
+                child.work_order_no AS childWorkOrderNo, dl.lot_no AS lotNo,
+                dl.serial_no AS serialNo, dl.remark
+         FROM production_disassembly_reports dr
+         INNER JOIN production_reports pr ON pr.id = dr.report_id
+         INNER JOIN production_disassembly_lines dl ON dl.disassembly_report_id = dr.id
+         INNER JOIN items i ON i.id = dl.item_id
+         LEFT JOIN warehouses w ON w.id = dl.warehouse_id
+         LEFT JOIN production_routes r ON r.id = dl.route_id
+         LEFT JOIN production_processes p ON p.id = dl.start_process_id
+         LEFT JOIN stock_documents receipt ON receipt.id = dl.receipt_document_id
+         LEFT JOIN production_work_orders child ON child.id = dl.child_work_order_id
+         WHERE dr.task_id = ?
+         ORDER BY dr.id, dl.line_no`
+      )
+      .all(id);
+    const assemblyLines = db
+      .prepare(
+        `SELECT pr.report_no AS reportNo, al.line_no AS lineNo, i.item_code AS itemCode,
+                i.name AS itemName, al.unit_quantity AS unitQuantity,
+                al.quantity, w.code AS warehouseCode, w.name AS warehouseName,
+                al.lot_no AS lotNo, al.serial_no AS serialNo,
+                issue.document_no AS issueDocumentNo, al.remark
+         FROM production_assembly_reports ar
+         INNER JOIN production_reports pr ON pr.id = ar.report_id
+         INNER JOIN production_assembly_lines al ON al.assembly_report_id = ar.id
+         INNER JOIN items i ON i.id = al.item_id
+         INNER JOIN warehouses w ON w.id = al.source_warehouse_id
+         INNER JOIN stock_documents issue ON issue.id = al.issue_document_id
+         WHERE ar.task_id = ?
+         ORDER BY ar.id, al.line_no`
       )
       .all(id);
     return {
@@ -2393,7 +2809,9 @@ export async function registerProductionRoutes(
       repairs,
       repairOperations,
       qualityChecks,
-      inventoryDocuments
+      inventoryDocuments,
+      disassemblyLines,
+      assemblyLines
     };
   });
 
@@ -2480,6 +2898,13 @@ export async function registerProductionRoutes(
       serialNo?: string;
       defectCode?: string;
       operationData?: Record<string, unknown>;
+      sourceWarehouseId?: number;
+      sourceQuantity?: number;
+      sourceLotNo?: string;
+      sourceSerialNo?: string;
+      disassemblyLines?: DisassemblyLineInput[];
+      assemblyQuantity?: number;
+      assemblyLines?: AssemblyLineInput[];
       remark?: string;
     };
   }>("/api/production/tasks/:id/report", { preHandler: requirePermission("production.operations.execute") }, async (request) => {
@@ -2488,8 +2913,14 @@ export async function registerProductionRoutes(
     if (task.status !== "in_progress" || task.flowStatus !== "active") {
       throw app.httpErrors.conflict("任务必须处于已开工且可报工状态");
     }
-    const inputQuantity = parseQuantity(request.body.inputQuantity, "投入数量");
-    const goodQuantity = parseQuantity(request.body.goodQuantity ?? 0, "合格数量", true);
+    const isDisassemblyTask = task.processCode === "PROC-DISASSEMBLY";
+    const isAssemblyTask = task.processCode === "PROC-ASSEMBLY";
+    const inputQuantity = parseQuantity(request.body.inputQuantity ?? request.body.sourceQuantity, "投入数量");
+    const goodQuantity = parseQuantity(
+      isDisassemblyTask ? request.body.goodQuantity ?? inputQuantity : request.body.goodQuantity ?? 0,
+      "合格数量",
+      true
+    );
     const defectQuantity = parseQuantity(request.body.defectQuantity ?? 0, "不良数量", true);
     const reworkQuantity = parseQuantity(request.body.reworkQuantity ?? 0, "返工数量", true);
     const scrapQuantity = parseQuantity(request.body.scrapQuantity ?? 0, "报废数量", true);
@@ -2502,11 +2933,340 @@ export async function registerProductionRoutes(
     if (task.inputQuantity + inputQuantity > task.plannedQuantity) {
       throw app.httpErrors.badRequest("累计投入数量不能大于任务计划数量");
     }
-    const lotNo = request.body.lotNo?.trim() ?? "";
-    const serialNo = request.body.serialNo?.trim() ?? "";
+    const lotNo = request.body.lotNo?.trim() || request.body.sourceLotNo?.trim() || "";
+    const serialNo = request.body.serialNo?.trim() || request.body.sourceSerialNo?.trim() || "";
     if (task.productTrackingMode === "lot" && !lotNo) throw app.httpErrors.badRequest("该商品按批次管理，报工必须填写批次号");
     if (task.productTrackingMode === "serial" && (!serialNo || inputQuantity !== 1)) {
       throw app.httpErrors.badRequest("该商品按序列号管理时，每次报工数量必须为 1 且填写序列号");
+    }
+    if (isDisassemblyTask) {
+      const sourceQuantity = parseQuantity(
+        request.body.sourceQuantity ?? request.body.inputQuantity,
+        "拆解投入数量"
+      );
+      const sourceWarehouseId = parseId(request.body.sourceWarehouseId, "拆解来源仓库");
+      const sourceWarehouse = getWarehouse(sourceWarehouseId);
+      if (!sourceWarehouse || sourceWarehouse.status !== "active") {
+        throw app.httpErrors.badRequest("拆解来源仓库不存在或已停用");
+      }
+      if (!canOperateWarehouse(request.user.id, sourceWarehouse)) {
+        throw app.httpErrors.forbidden("当前账号没有拆解来源仓库的数据范围");
+      }
+      const sourceLotNo = request.body.sourceLotNo?.trim() || lotNo;
+      const sourceSerialNo = request.body.sourceSerialNo?.trim() || serialNo;
+      if (task.productTrackingMode === "lot" && !sourceLotNo) {
+        throw app.httpErrors.badRequest("拆解来源商品按批次管理，必须填写来源批次号");
+      }
+      if (task.productTrackingMode === "serial" && (!sourceSerialNo || sourceQuantity !== 1)) {
+        throw app.httpErrors.badRequest("拆解来源商品按序列号管理时，数量必须为 1 且填写来源序列号");
+      }
+      if (task.inputQuantity + sourceQuantity > task.plannedQuantity) {
+        throw app.httpErrors.badRequest("累计拆解数量不能大于任务计划数量");
+      }
+      if (getWarehouseBalance(task.productItemId, sourceWarehouseId, sourceLotNo, sourceSerialNo) < sourceQuantity) {
+        throw app.httpErrors.conflict("拆解来源商品库存不足，禁止负库存");
+      }
+      const sourceLines = request.body.disassemblyLines ?? [];
+      if (!sourceLines.length) throw app.httpErrors.badRequest("拆解至少需要一行元器件产出明细");
+      const lines = sourceLines.map((line, index) => validateDisassemblyLine(request.user.id, line, index));
+      const operationData = normalizeOperationData({
+        ...request.body.operationData,
+        disassemblyLines: lines.map((line) => ({
+          itemId: line.itemId,
+          itemCode: line.item.itemCode,
+          itemName: line.item.name,
+          quantity: line.quantity,
+          destinationType: line.destinationType,
+          warehouseId: line.warehouseId ?? "",
+          warehouseName: line.warehouseId ? getWarehouse(line.warehouseId)?.name ?? "" : "",
+          routeId: line.routeId ?? "",
+          routeName: line.routeId ? getRoute(line.routeId)?.name ?? "" : "",
+          startProcessId: line.startProcessId ?? "",
+          processName: line.startProcessId ? getProcess(line.startProcessId)?.name ?? "" : "",
+          lotNo: line.lotNo,
+          serialNo: line.serialNo,
+          remark: line.remark
+        }))
+      });
+      const reportNo = nextDailyCode("REP", "production_reports", "report_no");
+      const reportId = db.transaction(() => {
+        const reportResult = db
+          .prepare(
+            `INSERT INTO production_reports
+             (report_no, task_id, work_order_id, process_id, operator_user_id, report_date,
+              input_quantity, good_quantity, defect_quantity, rework_quantity, scrap_quantity,
+              lot_no, serial_no, remark, operation_data)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            reportNo,
+            id,
+            task.workOrderId,
+            task.processId,
+            request.user.id,
+            request.body.reportDate || today(),
+            sourceQuantity,
+            sourceQuantity,
+            0,
+            0,
+            0,
+            sourceLotNo,
+            sourceSerialNo,
+            request.body.remark?.trim() ?? "",
+            JSON.stringify(operationData)
+          );
+        const createdReportId = Number(reportResult.lastInsertRowid);
+        const issueDocumentId = createDisassemblyStockDocument(
+          "issue",
+          sourceWarehouse,
+          task.taskNo,
+          "生产拆解来源产品出库",
+          `来源生产拆解报工 ${reportNo}`,
+          request.user.id,
+          [{
+            itemId: task.productItemId,
+            quantity: sourceQuantity,
+            lotNo: sourceLotNo,
+            serialNo: sourceSerialNo,
+            remark: `来源任务 ${task.taskNo}`
+          }]
+        );
+        const disassemblyResult = db
+          .prepare(
+            `INSERT INTO production_disassembly_reports
+             (report_id, task_id, source_warehouse_id, source_lot_no, source_serial_no,
+              source_quantity, issue_document_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            createdReportId,
+            id,
+            sourceWarehouseId,
+            sourceLotNo,
+            sourceSerialNo,
+            sourceQuantity,
+            issueDocumentId
+          );
+        const disassemblyReportId = Number(disassemblyResult.lastInsertRowid);
+        const insertLine = db.prepare(
+          `INSERT INTO production_disassembly_lines
+           (disassembly_report_id, line_no, item_id, quantity, destination_type,
+            warehouse_id, route_id, start_process_id, receipt_document_id,
+            child_work_order_id, lot_no, serial_no, remark)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        const receiptDocumentByWarehouse = new Map<number, number>();
+        lines.forEach((line, index) => {
+          let receiptDocumentId: number | null = null;
+          if (line.destinationType === "warehouse" && line.warehouseId) {
+            receiptDocumentId = receiptDocumentByWarehouse.get(line.warehouseId) ?? null;
+            if (!receiptDocumentId) {
+              const warehouse = getWarehouse(line.warehouseId);
+              if (!warehouse) throw businessError(`第 ${index + 1} 行目标仓库不存在`, 409);
+              receiptDocumentId = createDisassemblyStockDocument(
+                "receipt",
+                warehouse,
+                task.taskNo,
+                "生产拆解元器件入库",
+                `来源生产拆解报工 ${reportNo}`,
+                request.user.id,
+                []
+              );
+              receiptDocumentByWarehouse.set(line.warehouseId, receiptDocumentId);
+            }
+            const receiptLineNo = (
+              db
+                .prepare("SELECT COUNT(*) AS count FROM stock_document_lines WHERE document_id = ?")
+                .get(receiptDocumentId) as { count: number }
+            ).count + 1;
+            db.prepare(
+              `INSERT INTO stock_document_lines
+               (document_id, line_no, item_id, quantity, lot_no, serial_no, remark)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`
+            ).run(
+              receiptDocumentId,
+              receiptLineNo,
+              line.itemId,
+              line.quantity,
+              line.lotNo,
+              line.serialNo,
+              line.remark || `来源拆解报工 ${reportNo}`
+            );
+          }
+          const childWorkOrderId = createDisassemblyChildWorkOrder(task, line, request.user.id);
+          insertLine.run(
+            disassemblyReportId,
+            index + 1,
+            line.itemId,
+            line.quantity,
+            line.destinationType,
+            line.warehouseId,
+            line.routeId,
+            line.startProcessId,
+            receiptDocumentId,
+            childWorkOrderId,
+            line.lotNo,
+            line.serialNo,
+            line.remark
+          );
+        });
+        db.prepare(
+          `UPDATE production_tasks
+           SET input_quantity = input_quantity + ?, good_quantity = good_quantity + ?,
+               output_quantity = output_quantity + ?, status = 'in_progress',
+               flow_status = 'awaiting_inventory', output_document_id = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`
+        ).run(sourceQuantity, sourceQuantity, sourceQuantity, issueDocumentId, id);
+        return createdReportId;
+      })();
+      updateWorkOrderProgress(task.workOrderId);
+      recordAudit(request.user.id, "DISASSEMBLY_REPORT", "production_task", id, `生产拆解报工 ${task.taskNo}，单号 ${reportNo}`, clientIp(request));
+      return { item: getTask(id), reportId };
+    }
+    if (isAssemblyTask) {
+      const assemblyQuantity = parseQuantity(
+        request.body.assemblyQuantity ?? request.body.inputQuantity,
+        "本次组装数量"
+      );
+      if (assemblyQuantity !== inputQuantity) {
+        throw app.httpErrors.badRequest("本次组装数量必须等于投入数量");
+      }
+      const assemblyLines = request.body.assemblyLines ?? [];
+      if (!assemblyLines.length) {
+        throw app.httpErrors.badRequest("组装至少需要一行元器件明细");
+      }
+      const lines = assemblyLines.map((line, index) =>
+        validateAssemblyLine(request.user.id, line, assemblyQuantity, index)
+      );
+      assertAssemblyLineBalances(lines);
+      const operationData = normalizeOperationData({
+        ...request.body.operationData,
+        assemblyLines: lines.map((line) => ({
+          itemId: line.itemId,
+          itemCode: line.item.itemCode,
+          itemName: line.item.name,
+          unitQuantity: line.unitQuantity,
+          quantity: line.quantity,
+          sourceWarehouseId: line.sourceWarehouseId,
+          sourceWarehouseName: line.sourceWarehouse.name,
+          lotNo: line.lotNo,
+          serialNo: line.serialNo,
+          remark: line.remark
+        }))
+      });
+      const reportNo = nextDailyCode("REP", "production_reports", "report_no");
+      const reportId = db.transaction(() => {
+        const reportResult = db
+          .prepare(
+            `INSERT INTO production_reports
+             (report_no, task_id, work_order_id, process_id, operator_user_id, report_date,
+              input_quantity, good_quantity, defect_quantity, rework_quantity, scrap_quantity,
+              lot_no, serial_no, remark, operation_data)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            reportNo,
+            id,
+            task.workOrderId,
+            task.processId,
+            request.user.id,
+            request.body.reportDate || today(),
+            assemblyQuantity,
+            assemblyQuantity,
+            0,
+            0,
+            0,
+            lotNo,
+            serialNo,
+            request.body.remark?.trim() ?? "",
+            JSON.stringify(operationData)
+          );
+        const createdReportId = Number(reportResult.lastInsertRowid);
+        const assemblyResult = db
+          .prepare(
+            `INSERT INTO production_assembly_reports
+             (report_id, task_id, output_quantity)
+             VALUES (?, ?, ?)`
+          )
+          .run(createdReportId, id, assemblyQuantity);
+        const assemblyReportId = Number(assemblyResult.lastInsertRowid);
+        const issueDocumentByWarehouse = new Map<number, number>();
+        const insertLine = db.prepare(
+          `INSERT INTO production_assembly_lines
+           (assembly_report_id, line_no, item_id, source_warehouse_id,
+            unit_quantity, quantity, lot_no, serial_no, issue_document_id, remark)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        for (const [index, line] of lines.entries()) {
+          let issueDocumentId = issueDocumentByWarehouse.get(line.sourceWarehouseId);
+          if (!issueDocumentId) {
+            issueDocumentId = createDisassemblyStockDocument(
+              "issue",
+              line.sourceWarehouse,
+              task.taskNo,
+              "生产组装元器件领用出库",
+              `来源生产组装报工 ${reportNo}`,
+              request.user.id,
+              []
+            );
+            issueDocumentByWarehouse.set(line.sourceWarehouseId, issueDocumentId);
+          }
+          const lineNo = (
+            db.prepare("SELECT COUNT(*) AS count FROM stock_document_lines WHERE document_id = ?")
+              .get(issueDocumentId) as { count: number }
+          ).count + 1;
+          db.prepare(
+            `INSERT INTO stock_document_lines
+             (document_id, line_no, item_id, quantity, lot_no, serial_no, remark)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+          ).run(
+            issueDocumentId,
+            lineNo,
+            line.itemId,
+            line.quantity,
+            line.lotNo,
+            line.serialNo,
+            line.remark || `来源组装报工 ${reportNo}`
+          );
+          insertLine.run(
+            assemblyReportId,
+            index + 1,
+            line.itemId,
+            line.sourceWarehouseId,
+            line.unitQuantity,
+            line.quantity,
+            line.lotNo,
+            line.serialNo,
+            issueDocumentId,
+            line.remark
+          );
+        }
+        const nextInput = task.inputQuantity + assemblyQuantity;
+        const nextGood = task.goodQuantity + assemblyQuantity;
+        db.prepare(
+          `UPDATE production_tasks
+           SET input_quantity = ?, good_quantity = ?, output_lot_no = COALESCE(NULLIF(?, ''), output_lot_no),
+               output_serial_no = COALESCE(NULLIF(?, ''), output_serial_no),
+               status = 'in_progress', flow_status = 'awaiting_inventory',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`
+        ).run(nextInput, nextGood, lotNo, serialNo, id);
+        if (task.outputTarget === "semi_finished" || task.outputTarget === "finished_goods") {
+          const outputDocumentId = createProductionReceipt(
+            { ...task, outputLotNo: lotNo, outputSerialNo: serialNo },
+            request.user.id,
+            assemblyQuantity
+          );
+          db.prepare(
+            "UPDATE production_assembly_reports SET output_document_id = ? WHERE id = ?"
+          ).run(outputDocumentId, assemblyReportId);
+        }
+        return createdReportId;
+      })();
+      updateWorkOrderProgress(task.workOrderId);
+      recordAudit(request.user.id, "ASSEMBLY_REPORT", "production_task", id, `生产组装报工 ${task.taskNo}，单号 ${reportNo}`, clientIp(request));
+      return { item: getTask(id), reportId };
     }
     const operationData = normalizeOperationData(request.body.operationData);
     const chipTestRows = task.processCode.includes("CHIP-TEST") || task.processName.includes("芯片初测")

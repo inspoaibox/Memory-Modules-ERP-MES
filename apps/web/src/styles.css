@@ -335,6 +335,36 @@ td small { margin-top: 4px; color: #91a0af; font-size: 11px; }
 .entry-table input, .entry-table select, .entry-table textarea { min-width: 96px; height: 34px; padding: 7px 8px; font-size: 12px; }
 .entry-table textarea { height: 42px; min-height: 42px; resize: vertical; }
 .entry-table select[multiple] { height: 62px; min-width: 140px; }
+.assembly-output-table { min-width: 1120px; }
+.assembly-lines-table { min-width: 1560px; }
+.assembly-lines-table th:nth-child(1), .assembly-lines-table td:nth-child(1) { width: 44px; }
+.assembly-lines-table th:nth-child(2), .assembly-lines-table td:nth-child(2) { width: 230px; }
+.assembly-lines-table th:nth-child(3), .assembly-lines-table td:nth-child(3) { width: 220px; }
+.assembly-lines-table th:nth-child(4), .assembly-lines-table td:nth-child(4),
+.assembly-lines-table th:nth-child(5), .assembly-lines-table td:nth-child(5),
+.assembly-lines-table th:nth-child(6), .assembly-lines-table td:nth-child(6) { width: 120px; }
+.assembly-lines-table th:nth-child(7), .assembly-lines-table td:nth-child(7),
+.assembly-lines-table th:nth-child(8), .assembly-lines-table td:nth-child(8) { width: 160px; }
+.assembly-lines-table th:nth-child(9), .assembly-lines-table td:nth-child(9) { width: 220px; }
+.task-flow-detail-table { min-width: 1360px; table-layout: fixed; }
+.task-flow-detail-table th, .task-flow-detail-table td { padding: 10px 12px; vertical-align: top; }
+.task-flow-detail-table td strong, .task-flow-detail-table td small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-flow-detail-table .quantity-cell, .task-flow-detail-table .quantity-positive, .task-flow-detail-table .quantity-negative { white-space: nowrap; }
+.task-flow-disassembly-table th:nth-child(1), .task-flow-disassembly-table td:nth-child(1) { width: 150px; }
+.task-flow-disassembly-table th:nth-child(2), .task-flow-disassembly-table td:nth-child(2) { width: 220px; }
+.task-flow-disassembly-table th:nth-child(3), .task-flow-disassembly-table td:nth-child(3) { width: 90px; }
+.task-flow-disassembly-table th:nth-child(4), .task-flow-disassembly-table td:nth-child(4) { width: 120px; }
+.task-flow-disassembly-table th:nth-child(5), .task-flow-disassembly-table td:nth-child(5) { width: 250px; }
+.task-flow-disassembly-table th:nth-child(6), .task-flow-disassembly-table td:nth-child(6) { width: 160px; }
+.task-flow-disassembly-table th:nth-child(7), .task-flow-disassembly-table td:nth-child(7) { width: 260px; }
+.task-flow-assembly-table th:nth-child(1), .task-flow-assembly-table td:nth-child(1) { width: 150px; }
+.task-flow-assembly-table th:nth-child(2), .task-flow-assembly-table td:nth-child(2) { width: 220px; }
+.task-flow-assembly-table th:nth-child(3), .task-flow-assembly-table td:nth-child(3) { width: 200px; }
+.task-flow-assembly-table th:nth-child(4), .task-flow-assembly-table td:nth-child(4) { width: 110px; }
+.task-flow-assembly-table th:nth-child(5), .task-flow-assembly-table td:nth-child(5) { width: 110px; }
+.task-flow-assembly-table th:nth-child(6), .task-flow-assembly-table td:nth-child(6) { width: 160px; }
+.task-flow-assembly-table th:nth-child(7), .task-flow-assembly-table td:nth-child(7) { width: 190px; }
+.task-flow-assembly-table th:nth-child(8), .task-flow-assembly-table td:nth-child(8) { width: 260px; }
 .entry-index-cell { width: 44px; color: #6d8ba5; font-family: Consolas, monospace; font-weight: 800; text-align: center; }
 .entry-number-cell { width: 98px; text-align: right; }
 .entry-number-cell input { min-width: 78px; width: 82px; text-align: right; }

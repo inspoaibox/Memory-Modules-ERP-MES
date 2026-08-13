@@ -81,6 +81,8 @@ type Page =
   | "audit"
   | "production-overview"
   | "production-bga"
+  | "production-disassembly"
+  | "production-assembly"
   | "production-chip-initial-test"
   | "production-outsource"
   | "production-chip-retest"
@@ -130,6 +132,8 @@ const pageLabels: Record<Page, string> = {
   audit: "系统设置 / 操作审计",
   "production-overview": "生产管理 / 工作台",
   "production-bga": "生产管理 / 芯片拆卸植球",
+  "production-disassembly": "生产管理 / 生产拆解",
+  "production-assembly": "生产管理 / 生产组装",
   "production-chip-initial-test": "生产管理 / 芯片初测",
   "production-outsource": "生产管理 / 委外加工",
   "production-chip-retest": "生产管理 / 委外回厂复测",
@@ -182,6 +186,8 @@ const navItems: NavItem[] = [
   { key: "audit", label: "操作审计", icon: FileClock, permission: "system.audit.view", group: "系统管理", section: "system" },
   { key: "production-overview", label: "生产工作台", icon: Factory, permission: "production.dashboard.view", group: "业务模块", section: "production" },
   { key: "production-workorders", label: "生产计划与工单", icon: PackageCheck, permission: "production.workorders.view", group: "业务模块", section: "production" },
+  { key: "production-disassembly", label: "生产拆解", icon: PackageMinus, permission: "production.tasks.view", group: "业务模块", section: "production", processCode: "PROC-DISASSEMBLY" },
+  { key: "production-assembly", label: "生产组装", icon: PackagePlus, permission: "production.tasks.view", group: "业务模块", section: "production", processCode: "PROC-ASSEMBLY" },
   { key: "production-bga", label: "芯片拆卸植球", icon: Wrench, permission: "production.tasks.view", group: "业务模块", section: "production", processCode: "PROC-BGA" },
   { key: "production-chip-initial-test", label: "芯片初测", icon: ClipboardCheck, permission: "production.tasks.view", group: "业务模块", section: "production", processCode: "PROC-CHIP-TEST" },
   { key: "production-outsource", label: "委外加工", icon: ArrowLeftRight, permission: "production.tasks.view", group: "业务模块", section: "production", processCode: "PROC-OUTSOURCE" },
@@ -220,7 +226,7 @@ const navSections: Array<{
 }> = [
   { key: "system", label: "系统设置", icon: Settings2, group: "系统管理", isActive: (page) => ["users", "roles", "departments", "audit"].includes(page) },
   { key: "products", label: "商品管理", icon: PackageCheck, group: "业务模块", isActive: (page) => page.startsWith("product-") },
-  { key: "production", label: "生产管理", icon: Factory, group: "业务模块", isActive: (page) => ["production-overview", "production-workorders", "production-bga", "production-chip-initial-test", "production-outsource", "production-chip-retest", "production-smt", "production-aging", "production-fqc", "production-repairs", "production-scrap-products"].includes(page) },
+  { key: "production", label: "生产管理", icon: Factory, group: "业务模块", isActive: (page) => ["production-overview", "production-workorders", "production-disassembly", "production-assembly", "production-bga", "production-chip-initial-test", "production-outsource", "production-chip-retest", "production-smt", "production-aging", "production-fqc", "production-repairs", "production-scrap-products"].includes(page) },
   { key: "production-settings", label: "生产基础设置", icon: Settings2, group: "业务模块", isActive: (page) => ["production-tasks", "production-reports", "production-processes", "production-routes"].includes(page) },
   { key: "inventory", label: "库存管理", icon: Warehouse, group: "业务模块", isActive: (page) => page.startsWith("inventory-") }
 ];
@@ -313,6 +319,8 @@ function App() {
       {page === "product-units" && <ProductUnitsPage currentUser={user} />}
       {page === "product-attributes" && <ProductAttributesPage currentUser={user} />}
       {page === "production-overview" && <ProductionOverviewPage />}
+      {page === "production-disassembly" && <ProductionStationPage currentUser={user} station="disassembly" />}
+      {page === "production-assembly" && <ProductionStationPage currentUser={user} station="assembly" />}
       {page === "production-bga" && <ProductionStationPage currentUser={user} station="bga" />}
       {page === "production-chip-initial-test" && <ProductionStationPage currentUser={user} station="chip-initial-test" />}
       {page === "production-outsource" && <ProductionStationPage currentUser={user} station="outsource" />}
@@ -448,7 +456,7 @@ function AppShell({
   const [expandedSections, setExpandedSections] = useState<Record<NavSection, boolean>>(() => ({
     system: ["users", "roles", "departments", "audit"].includes(page),
     products: page.startsWith("product-"),
-    production: ["production-overview", "production-workorders", "production-bga", "production-chip-initial-test", "production-outsource", "production-chip-retest", "production-smt", "production-aging", "production-fqc", "production-repairs", "production-scrap-products"].includes(page),
+    production: ["production-overview", "production-workorders", "production-disassembly", "production-assembly", "production-bga", "production-chip-initial-test", "production-outsource", "production-chip-retest", "production-smt", "production-aging", "production-fqc", "production-repairs", "production-scrap-products"].includes(page),
     "production-settings": ["production-tasks", "production-reports", "production-processes", "production-routes"].includes(page),
     inventory: page.startsWith("inventory-")
   }));
