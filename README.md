@@ -1,378 +1,350 @@
 # 内存条 ERP + MES 系统
 
-内存条工厂 ERP 与 MES 一体化系统，当前采用 pnpm workspace 管理前后端工程：
+内存条工厂 ERP 与 MES 一体化系统。当前工程包括：
 
-- ERP：商品资料、分类、属性、仓库、库位、库存查询、入库、出库、调拨、盘点、报废、库存台账。
-- MES：生产计划、生产工单、工艺路线、工序任务、工序报工、测试、不良维修、报废产品和生产追溯。
+- ERP：商品资料、商品分类、商品属性、仓库、仓库地址、库位、库存查询、入库、出库、调拨、盘点、报废、库存台账。
+- MES：生产计划、生产工单、工艺路线、工序任务、芯片测试、不良维修、报废产品、生产追溯。
 - 系统管理：员工账号、组织部门、角色权限、工序授权、操作审计。
-- 权限模型：系统总管理员、部门经理、普通员工；菜单显示由权限控制，后端接口会再次校验。
+- 权限模型：系统总管理员、部门经理、普通员工；前端控制菜单，后端接口再次校验权限。
 
-本文档是项目的安装、部署、启动、维护、备份、升级和故障处理手册。业务方案和完整功能规划见根目录的《内存条 ERP-MES 一体化系统完整解决方案说明书.docx》及《库存ERP模块调研与分阶段建设方案.md》。
+业务方案见根目录：
 
-## 1. 系统架构
+- `内存条ERP-MES一体化系统完整解决方案说明书.docx`
+- `库存ERP模块调研与分阶段建设方案.md`
+
+本文档是实际部署手册。生产服务器使用 Linux `/root` 目录示例；Windows 命令只出现在最后的本地开发章节。
+
+## 1. 生产架构
+
+生产环境不是分别运行两个开发服务器，而是：
 
 ```text
 浏览器
   |
-  | 生产环境：IIS/Nginx 静态文件 + /api 反向代理
-  | 开发环境：Vite 开发服务器 + /api 代理
   v
-React + Vite 前端管理台
+Nginx : 80/443
+  |-- /              -> apps/web/dist 静态前端
+  |-- /api/*         -> 127.0.0.1:43127
   |
-  v
-Fastify API
-  |
-  v
-SQLite（WAL 模式）
+  +-- PM2 -> apps/api/dist/index.js
+                |
+                v
+        SQLite: apps/api/data/erp-mes.db
 ```
 
-### 1.1 目录说明
+说明：
+
+- PM2 只守护后端 API。
+- 前端构建为静态文件，由 Nginx 提供，不需要使用 `vite dev` 或 `vite preview`。
+- SQLite 是应用内置数据库，不需要安装 MySQL、PostgreSQL 或单独启动数据库服务。
+- API 第一次启动时自动创建数据库目录、数据库文件、表、权限、系统管理员和内置基础数据。
+- 数据库路径取决于 API 的工作目录。项目提供的 PM2 配置会把工作目录固定为 `apps/api`，因此生产数据库路径为：
 
 ```text
-apps/
-  api/                 Fastify API、SQLite 初始化、权限和业务接口
-    src/               后端源码
-    data/              运行时 SQLite 数据库，不纳入版本控制
-    dist/              后端编译产物
-  web/                 React + Vite 前端管理台
-    src/               前端源码
-    dist/              前端构建产物
-data/                  预留目录；当前 API 默认使用 apps/api/data
-pnpm-lock.yaml         依赖锁定文件
-package.json           根工程命令
-.runtime-logs/         本地运行日志，不纳入版本控制
+/root/Memory-Modules-ERP-MES/apps/api/data/erp-mes.db
 ```
 
-### 1.2 端口
+## 2. 版本和端口
 
-当前端口已避开常见的 `3000`、`3001`、`5173`：
+| 项目 | 当前值 |
+| --- | --- |
+| Node.js | 24.x，建议生产与开发保持同一主版本 |
+| pnpm | 10.15.0 |
+| API | 43127 |
+| 前端开发服务器 | 43128，仅本地开发使用 |
+| 生产入口 | Nginx 80/443 |
+| 数据库 | SQLite + better-sqlite3 |
+| PM2 进程名 | `memory-erp-mes-api` |
 
-| 服务 | 默认地址 | 配置位置 |
-| --- | --- | --- |
-| 前端开发服务器 | `http://localhost:43128` | `apps/web/vite.config.ts` |
-| 后端 API | `http://localhost:43127` | `apps/api/src/index.ts` 的 `PORT` |
-| API 健康检查 | `http://localhost:43127/api/health` | 后端接口 |
+端口说明：
 
-如果需要改端口，必须同时修改：API 的 `PORT`、Vite 的 `server.port`、Vite 的 `/api` 代理地址以及 API 的 CORS 白名单。
+- 生产对外只开放 Nginx 的 80/443。
+- API 的 43127 只监听本机或内网，不要直接暴露到公网。
+- 43128 是 Vite 开发端口，生产环境不启动。
 
-## 2. 环境要求
+## 3. Linux 服务器首次安装
 
-### 2.1 推荐版本
+以下命令适用于 Debian/Ubuntu 系 Linux，并假设使用当前服务器的 `root` 账号。
 
-- Windows Server 2019/2022 或 Windows 10/11。
-- Node.js 20 LTS 或更高版本。当前开发环境使用 Node.js `v24.14.1`。
-- pnpm `10.x`。项目锁定版本为 `10.15.0`。
-- Git。
-- PM2：生产进程守护和开机恢复使用。
-- IIS 或 Nginx：生产环境提供前端静态文件和 API 反向代理，二选一。
+### 3.1 安装系统依赖
 
-SQLite 不需要单独安装，数据库由 `better-sqlite3` 使用。Windows 安装依赖时如果出现原生模块编译问题，应优先使用项目锁定的 Node.js 与 pnpm 版本，不要直接删除数据库或重新初始化系统。
+```bash
+apt-get update
+apt-get install -y ca-certificates curl gnupg git build-essential python3 make g++ sqlite3 nginx acl
+```
 
-### 2.2 检查版本
+这些依赖的用途：
 
-```powershell
+- `git`：获取和更新项目。
+- `build-essential`、`python3`、`make`、`g++`：编译 `better-sqlite3` 等 Node.js 原生依赖。
+- `sqlite3`：执行数据库检查、在线备份和恢复验证。
+- `nginx`：提供前端静态文件并代理 `/api`。
+
+### 3.2 安装 Node.js 24
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+apt-get install -y nodejs
+```
+
+检查 Node.js 和 npm：
+
+```bash
+node --version
+npm --version
+```
+
+### 3.3 安装 pnpm 10.15.0
+
+```bash
+corepack enable
+corepack prepare pnpm@10.15.0 --activate
+pnpm --version
+```
+
+如果服务器提示没有 `corepack`，执行：
+
+```bash
+npm install --global corepack
+corepack enable
+corepack prepare pnpm@10.15.0 --activate
+pnpm --version
+```
+
+### 3.4 安装 PM2
+
+```bash
+npm install --global pm2
+pm2 --version
+```
+
+### 3.5 最终检查
+
+```bash
 node --version
 pnpm --version
 git --version
 pm2 --version
+sqlite3 --version
+nginx -v
 ```
 
-没有 pnpm 时：
+在这一步之前不要执行项目的 `pnpm install`。如果 `node`、`pnpm` 或 `pm2` 仍然显示 `command not found`，先处理系统安装和 PATH，不要继续启动项目。
 
-```powershell
-corepack enable
-corepack prepare pnpm@10.15.0 --activate
+## 4. 获取项目
+
+### 4.1 使用 Git 获取
+
+把 `<仓库地址>` 替换为真实 Git 仓库地址：
+
+```bash
+mkdir -p /root
+cd /root
+git clone <仓库地址> Memory-Modules-ERP-MES
+cd /root/Memory-Modules-ERP-MES
 ```
 
-没有 PM2 时：
+### 4.2 项目通过压缩包上传
 
-```powershell
-pnpm add --global pm2
-pm2 --version
+将完整项目上传并解压到以下目录：
+
+```text
+/root/Memory-Modules-ERP-MES
 ```
 
-## 3. 获取项目和安装依赖
+确认目录中能看到：
 
-### 3.1 首次安装
+```bash
+cd /root/Memory-Modules-ERP-MES
+ls -la
+```
 
-在部署目录执行：
+至少应存在 `package.json`、`pnpm-lock.yaml`、`apps/api` 和 `apps/web`。
 
-```powershell
-git clone <项目仓库地址> D:\Apps\Memory-Modules-ERP-MES
-Set-Location D:\Apps\Memory-Modules-ERP-MES
+生产环境不要直接复制 Windows 的 `node_modules`。Linux 必须在服务器上重新执行 `pnpm install`，否则很容易出现 `better_sqlite3.node` 或 Node.js ABI 不匹配。
 
-corepack enable
-corepack prepare pnpm@10.15.0 --activate
+## 5. 安装项目依赖
+
+```bash
+cd /root/Memory-Modules-ERP-MES
 pnpm install --frozen-lockfile
 ```
 
-如果项目不是通过 Git 获取，将完整项目目录复制到部署目录后，从 `pnpm install --frozen-lockfile` 开始执行。生产部署不得把开发机的 `node_modules` 直接复制到服务器。
+如果出现原生模块错误：
 
-### 3.2 安装原生依赖失败
-
-`better-sqlite3` 是原生 Node.js 模块。出现 `Cannot find module better_sqlite3.node`、`compiled\...` 或 ABI 不匹配时，按以下顺序处理：
-
-```powershell
-Set-Location D:\Apps\Memory-Modules-ERP-MES
-pnpm install --force
+```bash
+cd /root/Memory-Modules-ERP-MES
 pnpm rebuild better-sqlite3
-pnpm --filter @memory/api typecheck
+pnpm install --frozen-lockfile
 ```
 
-如果仍失败，确认 Node.js 主版本没有在运行中途更换，再重新安装依赖。不要删除 `apps/api/data`，数据库与依赖无关。
+如果仍然失败，检查：
 
-## 4. 配置正式环境
+```bash
+node --version
+pnpm --version
+which node
+which pnpm
+```
 
-后端支持以下环境变量：
+确认运行中的 Node.js 与安装依赖时使用的是同一个版本。不要通过删除数据库目录解决依赖问题，依赖和数据库是两件事。
 
-| 变量 | 默认值 | 正式环境要求 |
-| --- | --- | --- |
-| `NODE_ENV` | 空 | 设置为 `production` |
-| `PORT` | `43127` | 使用未被占用的 API 端口 |
-| `JWT_SECRET` | 开发密钥 | 必须设置为随机长密钥 |
-| `INITIAL_ADMIN_PASSWORD` | 开发初始密码 | `NODE_ENV=production` 时必须设置 |
-| `SEED_DEMO_DATA` | 空 | 正式环境不要设置为 `true` |
+## 6. 配置生产环境
 
-创建 `apps/api/.env`。该文件会在下面的 PM2 配置中通过 Node.js 的 `--env-file=.env` 显式加载：
+### 6.1 创建 API 环境变量
+
+项目已经提供模板：
+
+```text
+/root/Memory-Modules-ERP-MES/apps/api/.env.example
+```
+
+复制为正式配置：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+cp apps/api/.env.example apps/api/.env
+chmod 600 apps/api/.env
+nano apps/api/.env
+```
+
+正式环境至少配置：
 
 ```dotenv
 NODE_ENV=production
 PORT=43127
-JWT_SECRET=请替换为至少32位的随机密钥
+JWT_SECRET=请替换为随机长密钥
 INITIAL_ADMIN_PASSWORD=请替换为正式管理员初始密码
 SEED_DEMO_DATA=false
 ```
 
-生成随机密钥示例：
+生成随机 JWT 密钥：
 
-```powershell
-node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+```bash
+openssl rand -hex 48
 ```
+
+把命令输出复制到 `JWT_SECRET`。`INITIAL_ADMIN_PASSWORD` 是第一次创建 `admin` 账号时使用的初始密码，首次登录后必须在系统内修改。
 
 安全要求：
 
-- `.env` 不提交 Git，不发送到聊天工具，不放入前端 `apps/web`。
-- 正式环境首次登录后立即修改管理员初始密码。
-- `JWT_SECRET` 变更会使现有 JWT 失效，变更前应通知所有用户重新登录。
-- 正式环境不要执行 `pnpm seed:demo`，不要设置 `SEED_DEMO_DATA=true`。
-- 当前 SQLite 文件中包含账号、权限、库存和生产数据，应限制服务器文件权限。
+- `.env` 不能提交 Git，不能放到 `apps/web/dist`。
+- `JWT_SECRET` 变更后，所有现有登录令牌都会失效。
+- 正式环境不能执行 `pnpm seed:demo`，不能设置 `SEED_DEMO_DATA=true`。
+- 生产服务器必须限制 `/root/Memory-Modules-ERP-MES/apps/api/data` 和 `.env` 的访问权限。
 
-## 5. 初始化和首次上线
+### 6.2 数据库初始化
 
-### 5.1 构建前检查
+本系统使用内置 SQLite，不需要执行 `apt install mysql-server`，也没有 MySQL 服务需要启动。
 
-```powershell
-Set-Location D:\Apps\Memory-Modules-ERP-MES
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm build
-```
-
-构建成功后，后端产物在 `apps/api/dist`，前端产物在 `apps/web/dist`。
-
-### 5.2 数据库初始化
-
-API 第一次启动时会自动：
-
-1. 创建 `apps/api/data` 目录。
-2. 创建 `erp-mes.db`。
-3. 创建表、索引、权限目录、系统总管理员角色和基础数据。
-4. 执行已内置的数据库结构升级。
-
-生产环境第一次启动前，确认 `.env` 已配置。初始化完成后使用管理员账号登录，按系统内流程创建：
-
-1. 部门和岗位职责。
-2. 员工账号。
-3. 角色和权限。
-4. 工序定义和工艺路线。
-5. 商品分类、属性、商品资料。
-6. 仓库、仓库地址和库位。
-7. 通过正常入库流程建立上线后的第一批库存。
-
-本系统是新系统，不能把历史期初库存直接写进数据库；上线库存应通过正常入库单据形成业务记录和审计记录。
-
-### 5.3 演示数据
-
-演示数据只适用于开发和测试环境：
-
-```powershell
-$env:NODE_ENV = "development"
-$env:SEED_DEMO_DATA = "true"
-pnpm seed:demo
-```
-
-演示账号首次登录需要修改密码。正式环境不要执行上述命令。`pnpm seed:demo` 不负责清空数据，也不应用于生产数据修复。
-
-## 6. 开发环境启动
-
-### 6.1 启动前后端
-
-```powershell
-Set-Location D:\软件开发项目\Memory-Modules-ERP-MES
-pnpm dev
-```
-
-访问：
-
-- 前端：`http://localhost:43128`
-- API：`http://localhost:43127/api/health`
-
-开发环境启动的是 Vite 热更新服务器和 `tsx watch` 后端，不适合生产运行。
-
-### 6.2 分开启动
-
-后端：
-
-```powershell
-pnpm --filter @memory/api dev
-```
-
-前端：
-
-```powershell
-pnpm --filter @memory/web dev
-```
-
-### 6.3 开发环境关闭
-
-在运行 `pnpm dev` 的终端按 `Ctrl+C`。如果端口仍被占用：
-
-```powershell
-Get-NetTCPConnection -LocalPort 43127,43128 -State Listen -ErrorAction SilentlyContinue |
-  Select-Object LocalPort,OwningProcess
-
-Get-Process -Id <进程号>
-Stop-Process -Id <进程号>
-```
-
-只停止确认属于本项目的进程。不要通过结束所有 `node.exe` 的方式处理，否则会影响其他项目。
-
-## 7. 生产构建和 PM2 启动
-
-### 7.1 推荐生产拓扑
-
-推荐使用：
+第一次启动 API 后会自动创建：
 
 ```text
-IIS/Nginx : 80 或 443
-  ├── /           -> apps/web/dist 静态文件
-  └── /api/*      -> http://127.0.0.1:43127
-
-PM2
-  └── @memory/api -> node apps/api/dist/index.js
+/root/Memory-Modules-ERP-MES/apps/api/data/erp-mes.db
+/root/Memory-Modules-ERP-MES/apps/api/data/erp-mes.db-wal
+/root/Memory-Modules-ERP-MES/apps/api/data/erp-mes.db-shm
 ```
 
-前端不需要由 PM2 运行。PM2 只守护后端 API，前端由 IIS/Nginx 提供静态文件，性能和维护都更稳定。
+新系统库存从零开始。上线后的第一批库存必须通过商品资料、仓库、入库单等正常业务流程建立，不要直接修改 SQLite 文件。
 
-### 7.2 编译生产代码
+## 7. 编译和首次启动
 
-```powershell
-Set-Location D:\Apps\Memory-Modules-ERP-MES
-pnpm install --frozen-lockfile
+### 7.1 类型检查和构建
+
+```bash
+cd /root/Memory-Modules-ERP-MES
 pnpm typecheck
 pnpm build
 ```
 
-### 7.3 PM2 配置文件
+构建产物：
 
-在项目根目录创建 `ecosystem.config.cjs`。该文件只描述进程，不包含密码：
-
-```javascript
-module.exports = {
-  apps: [
-    {
-      name: "memory-erp-mes-api",
-      cwd: "D:/Apps/Memory-Modules-ERP-MES/apps/api",
-      script: "dist/index.js",
-      interpreter: "node",
-      node_args: "--env-file=.env",
-      instances: 1,
-      exec_mode: "fork",
-      autorestart: true,
-      watch: false,
-      time: true,
-      max_memory_restart: "512M",
-      env: {
-        NODE_ENV: "production",
-        PORT: "43127",
-        SEED_DEMO_DATA: "false"
-      }
-    }
-  ]
-};
+```text
+/root/Memory-Modules-ERP-MES/apps/api/dist
+/root/Memory-Modules-ERP-MES/apps/web/dist
 ```
 
-`JWT_SECRET` 和 `INITIAL_ADMIN_PASSWORD` 放在 `apps/api/.env`，不要明文写入 PM2 配置。当前源码不会自动读取 `.env`；如果直接用 `node dist/index.js` 启动，需要先通过系统环境变量或 Node.js 的 `--env-file` 注入这些变量。
+### 7.2 使用 PM2 启动后端
 
-### 7.4 启动、查看和停止
+项目根目录提供 `ecosystem.config.cjs`，它会：
 
-```powershell
-Set-Location D:\Apps\Memory-Modules-ERP-MES
+- 使用 `apps/api` 作为工作目录，确保 SQLite 路径正确。
+- 使用 Node.js `--env-file=.env` 加载生产环境变量。
+- 以 `memory-erp-mes-api` 进程名启动 API。
+- 自动重启异常退出的 API。
+
+首次启动：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
 pm2 start ecosystem.config.cjs
 pm2 save
 pm2 status
+```
+
+检查 API：
+
+```bash
+curl http://127.0.0.1:43127/api/health
+```
+
+预期返回包含：
+
+```json
+{"ok":true,"service":"memory-erp-mes-api"}
+```
+
+检查数据库是否创建：
+
+```bash
+ls -lh /root/Memory-Modules-ERP-MES/apps/api/data
+```
+
+查看后端日志：
+
+```bash
 pm2 logs memory-erp-mes-api --lines 100
 ```
 
-验证 API：
+首次初始化完成后，使用账号 `admin` 和 `.env` 中的 `INITIAL_ADMIN_PASSWORD` 登录，然后立即修改密码。
 
-```powershell
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:43127/api/health
+## 8. 配置 Nginx
+
+项目放在 `/root` 下时，Nginx 的 `www-data` 用户默认可能无法读取 root 家目录。只给 Nginx 静态前端目录读取权限，不要把 `.env` 或数据库目录开放给 Nginx：
+
+```bash
+setfacl -m u:www-data:--x /root
+setfacl -m u:www-data:--x /root/Memory-Modules-ERP-MES
+setfacl -m u:www-data:--x /root/Memory-Modules-ERP-MES/apps
+setfacl -m u:www-data:--x /root/Memory-Modules-ERP-MES/apps/web
+setfacl -R -m u:www-data:rX /root/Memory-Modules-ERP-MES/apps/web/dist
 ```
 
-常用维护命令：
+创建站点配置：
 
-```powershell
-pm2 restart memory-erp-mes-api
-pm2 reload memory-erp-mes-api
-pm2 stop memory-erp-mes-api
-pm2 delete memory-erp-mes-api
-pm2 monit
+```bash
+nano /etc/nginx/sites-available/memory-erp-mes
 ```
 
-### 7.5 Windows 开机自启动
-
-PM2 在 Windows 下的自启动需要通过系统任务计划或 PM2 Windows 启动工具完成。建议使用任务计划程序：
-
-1. 打开“任务计划程序”，创建基本任务 `Memory ERP MES PM2`。
-2. 触发器选择“计算机启动时”。
-3. 操作选择启动程序。
-4. 程序填写 `pm2.cmd` 的绝对路径，可通过 `Get-Command pm2` 查询。
-5. 参数填写 `resurrect`。
-6. 起始位置填写 `D:\Apps\Memory-Modules-ERP-MES`。
-7. 选择“使用最高权限运行”，并配置为无论用户是否登录都运行。
-
-也可以使用 PM2 的启动脚本，但必须在目标 Windows 服务器上实际验证重启后的恢复：
-
-```powershell
-pm2 save
-pm2 resurrect
-```
-
-### 7.6 前端静态部署
-
-构建后的前端目录是：
-
-```text
-D:\Apps\Memory-Modules-ERP-MES\apps\web\dist
-```
-
-IIS/Nginx 应将站点根目录指向该目录，并将 `/api` 反向代理到 `http://127.0.0.1:43127`。前端使用相对路径请求 `/api`，因此不要把 API 地址写成公网数据库或开发机地址。
-
-IIS 需要启用 URL Rewrite 和 Application Request Routing；Nginx 配置的核心示例：
+写入以下内容：
 
 ```nginx
 server {
     listen 80;
-    server_name erp.example.com;
-    root D:/Apps/Memory-Modules-ERP-MES/apps/web/dist;
+    listen [::]:80;
+    server_name _;
+
+    root /root/Memory-Modules-ERP-MES/apps/web/dist;
     index index.html;
+    client_max_body_size 20m;
 
     location /api/ {
         proxy_pass http://127.0.0.1:43127;
+        proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     location / {
@@ -381,303 +353,373 @@ server {
 }
 ```
 
-生产环境应使用 HTTPS，并限制 API 端口只允许本机或内网访问，不要把 `43127` 直接暴露到公网。
+启用配置并检查：
 
-## 8. 数据库和文件备份
+```bash
+ln -s /etc/nginx/sites-available/memory-erp-mes /etc/nginx/sites-enabled/memory-erp-mes
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+systemctl enable nginx
+systemctl restart nginx
+```
 
-### 8.1 需要备份的内容
-
-至少备份：
+访问：
 
 ```text
-apps/api/data/erp-mes.db
-apps/api/.env
-ecosystem.config.cjs
-apps/web/dist/       （可由版本重新构建，也建议保留上线版本）
+http://服务器IP/
 ```
 
-`erp-mes.db-shm` 和 `erp-mes.db-wal` 是 SQLite WAL 运行文件。数据库备份必须使用 SQLite 在线备份或停机后复制完整文件，不能只复制正在运行中的 `.db` 主文件。
+生产环境建议继续配置域名和 HTTPS。API 的 43127 不需要被浏览器直接访问，浏览器统一访问 Nginx 的 `/api`。
 
-### 8.2 推荐：停机一致性备份
+## 9. PM2 开机自启动和维护
 
-维护窗口内执行：
+使用当前 root 用户配置 systemd：
 
-```powershell
-Set-Location D:\Apps\Memory-Modules-ERP-MES
-$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$backup = "D:\Backups\Memory-ERP-MES\$stamp"
-New-Item -ItemType Directory -Force $backup | Out-Null
-
-pm2 stop memory-erp-mes-api
-Copy-Item apps\api\data\erp-mes.db $backup\erp-mes.db
-Copy-Item apps\api\.env $backup\api.env -ErrorAction SilentlyContinue
-pm2 start memory-erp-mes-api
-
-Get-ChildItem $backup
+```bash
+pm2 startup systemd -u root --hp /root
 ```
 
-停机后如果目录中仍有 `.db-shm` 或 `.db-wal`，应一并保留；正常关闭后 WAL 通常会被合并或清理。
+PM2 会输出一条需要复制执行的 `sudo env ... pm2 startup ...` 命令。按终端输出执行，然后保存进程列表：
 
-### 8.3 在线备份：SQLite VACUUM INTO
-
-项目服务器已安装 SQLite 命令行时，可以不停止 API，执行 SQLite 在线备份：
-
-```powershell
-$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$backup = "D:\Backups\Memory-ERP-MES\$stamp"
-New-Item -ItemType Directory -Force $backup | Out-Null
-
-sqlite3.exe apps\api\data\erp-mes.db "PRAGMA wal_checkpoint(PASSIVE); VACUUM INTO '$($backup.Replace('\','/'))/erp-mes.db';"
-Copy-Item apps\api\.env $backup\api.env -ErrorAction SilentlyContinue
-```
-
-路径含空格时请使用绝对路径并注意命令引号。在线备份执行后必须检查目标文件存在且大小合理。
-
-### 8.4 备份策略
-
-建议生产环境：
-
-| 项目 | 建议 |
-| --- | --- |
-| 频率 | 每日全量备份；重要上线或批量导入前立即备份 |
-| 保留 | 最近 7 天每日备份、最近 4 周每周备份、每月保留 6 个月 |
-| 位置 | 服务器本机 + 独立磁盘或 NAS；不要只保留一份 |
-| 安全 | 备份目录限制管理员访问，异地副本加密 |
-| 验证 | 每月至少执行一次恢复演练，并验证能登录和查询业务数据 |
-
-备份完成不等于备份可恢复。每次重要版本上线前，都应做一次备份并记录备份路径、时间和文件大小。
-
-## 9. 数据恢复和回滚
-
-### 9.1 恢复前要求
-
-- 先停止 API，避免恢复过程中数据库继续写入。
-- 保留当前故障数据库副本，不要直接覆盖后丢失现场。
-- 确认备份对应的版本和时间点。
-- 恢复后需要重新验证账号、权限、库存余额、生产工单和审计记录。
-
-### 9.2 从备份恢复
-
-```powershell
-Set-Location D:\Apps\Memory-Modules-ERP-MES
-$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$data = "apps\api\data"
-
-pm2 stop memory-erp-mes-api
-Copy-Item $data\erp-mes.db "D:\Backups\Memory-ERP-MES\before-restore-$stamp.db"
-Copy-Item "D:\Backups\Memory-ERP-MES\<备份时间>\erp-mes.db" "$data\erp-mes.db" -Force
-Remove-Item "$data\erp-mes.db-shm","$data\erp-mes.db-wal" -Force -ErrorAction SilentlyContinue
-pm2 start memory-erp-mes-api
-
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:43127/api/health
-pm2 logs memory-erp-mes-api --lines 100
-```
-
-如果恢复的是与当前程序结构不同的旧版本数据库，应先在隔离环境启动验证，不要直接在生产环境尝试自动升级。
-
-## 10. 系统升级流程
-
-所有升级都应先在测试环境验证，再进入生产环境。推荐流程如下：
-
-### 10.1 发布前
-
-1. 记录当前 Git commit、版本号和数据库文件大小。
-2. 阅读变更说明，重点检查数据库结构、权限、库存和生产流程变化。
-3. 备份数据库、`.env` 和当前前端 `dist`。
-4. 在测试环境使用生产同版本数据库副本验证升级。
-5. 通知用户维护时间，禁止升级期间创建入库、出库、盘点、报废和生产报工单据。
-
-### 10.2 更新代码
-
-```powershell
-Set-Location D:\Apps\Memory-Modules-ERP-MES
-pm2 stop memory-erp-mes-api
-
-git fetch --all --prune
-git checkout <目标版本或commit>
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm build
-```
-
-API 启动时会执行代码中已实现的数据库结构升级。升级后不要重复执行演示种子脚本。
-
-### 10.3 启动和验收
-
-```powershell
-pm2 start ecosystem.config.cjs
+```bash
 pm2 save
-
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:43127/api/health
-pm2 status
-pm2 logs memory-erp-mes-api --lines 100
+systemctl status pm2-root
 ```
 
-至少验收：
+常用命令：
 
-- 登录、退出登录和修改密码。
-- 系统管理员、部门经理、普通员工的菜单和接口权限。
-- 商品资料、分类树、仓库和库位。
-- 入库、出库、调拨、盘点、报废的预览、打印、下载和状态流转。
-- 生产工单的暂停、继续、停止、终止、关闭和删除规则。
-- 芯片测试、不良维修、维修报废和报废产品数据流转。
-- 库存余额、库存台账、审计日志。
-
-### 10.4 失败回滚
-
-如果 API 无法启动、健康检查失败或业务验收失败：
-
-```powershell
-pm2 stop memory-erp-mes-api
-git checkout <上一个稳定版本>
-pnpm install --frozen-lockfile
-pnpm build
-pm2 start ecosystem.config.cjs
-```
-
-如果问题来自数据库结构变更，先停止服务，再从升级前备份恢复数据库。代码回滚和数据库回滚必须作为一个整体评估，不能只回滚其中一项。
-
-## 11. 日常维护
-
-### 11.1 服务状态
-
-```powershell
+```bash
 pm2 status
 pm2 describe memory-erp-mes-api
 pm2 logs memory-erp-mes-api --lines 200
+pm2 restart memory-erp-mes-api --update-env
+pm2 reload memory-erp-mes-api --update-env
+pm2 stop memory-erp-mes-api
+pm2 start ecosystem.config.cjs
+pm2 delete memory-erp-mes-api
+pm2 monit
 ```
 
-### 11.2 端口检查
+生产环境不要使用以下开发命令：
 
-```powershell
-Get-NetTCPConnection -LocalPort 43127,43128 -State Listen -ErrorAction SilentlyContinue |
-  Select-Object LocalAddress,LocalPort,OwningProcess
+```bash
+pnpm --filter @memory/api dev
+pnpm --filter @memory/web dev
 ```
 
-### 11.3 健康检查
+这两个命令只用于本地开发热更新。生产环境后端由 PM2 管理，前端由 Nginx 管理。
 
-```powershell
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:43127/api/health
+## 10. 数据库备份和恢复
+
+### 10.1 在线备份
+
+SQLite 运行在 WAL 模式，推荐使用 `sqlite3` 的在线备份，不要只复制运行中的 `.db` 主文件。
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+BACKUP_DIR="/root/backups/memory-erp-mes/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP_DIR"
+sqlite3 apps/api/data/erp-mes.db ".backup '$BACKUP_DIR/erp-mes.db'"
+cp -p apps/api/.env "$BACKUP_DIR/api.env"
+cp -p ecosystem.config.cjs "$BACKUP_DIR/ecosystem.config.cjs"
+ls -lh "$BACKUP_DIR"
 ```
 
-预期返回类似：
+### 10.2 停机备份
 
-```json
-{"ok":true,"service":"memory-erp-mes-api","timestamp":"..."}
+```bash
+cd /root/Memory-Modules-ERP-MES
+BACKUP_DIR="/root/backups/memory-erp-mes/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP_DIR"
+pm2 stop memory-erp-mes-api
+cp -p apps/api/data/erp-mes.db "$BACKUP_DIR/erp-mes.db"
+cp -p apps/api/.env "$BACKUP_DIR/api.env"
+pm2 start ecosystem.config.cjs
 ```
 
-### 11.4 日志管理
+建议：
 
-PM2 日志目录和文件由实际 PM2 配置决定。建议定期查看并限制日志大小：
+- 每天至少一次全量备份。
+- 重要升级、权限批量调整、库存批量操作前立即备份。
+- 服务器本机和另一台服务器、NAS 或对象存储至少各保留一份。
+- 每月执行一次恢复演练，不能只看备份文件是否存在。
 
-```powershell
+### 10.3 恢复数据库
+
+恢复前保留当前故障现场：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+RESTORE_DIR="/root/backups/memory-erp-mes/<备份时间>"
+BEFORE_DIR="/root/backups/memory-erp-mes/before-restore-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BEFORE_DIR"
+
+pm2 stop memory-erp-mes-api
+cp -p apps/api/data/erp-mes.db "$BEFORE_DIR/erp-mes.db"
+cp -p "$RESTORE_DIR/erp-mes.db" apps/api/data/erp-mes.db
+rm -f apps/api/data/erp-mes.db-wal apps/api/data/erp-mes.db-shm
+pm2 start ecosystem.config.cjs
+```
+
+恢复后检查：
+
+```bash
+curl http://127.0.0.1:43127/api/health
+sqlite3 apps/api/data/erp-mes.db "PRAGMA integrity_check;"
+pm2 logs memory-erp-mes-api --lines 100
+```
+
+只有返回 `ok` 且业务验收通过，才算恢复完成。
+
+## 11. 升级和回滚
+
+### 11.1 升级前
+
+1. 记录当前 Git commit、PM2 状态和数据库文件大小。
+2. 执行一次数据库在线备份。
+3. 记录当前 `.env`、`ecosystem.config.cjs` 和前端版本。
+4. 通知用户暂停入库、出库、盘点、报废和生产报工。
+
+### 11.2 Linux 生产升级
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+pm2 stop memory-erp-mes-api
+
+git fetch --all --prune
+git pull --ff-only
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm build
+
+pm2 start ecosystem.config.cjs
+pm2 save
+curl http://127.0.0.1:43127/api/health
+pm2 status
+```
+
+如果只是修改环境变量：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+pm2 restart memory-erp-mes-api --update-env
+```
+
+### 11.3 回滚代码
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+pm2 stop memory-erp-mes-api
+git checkout <上一个稳定版本或commit>
+pnpm install --frozen-lockfile
+pnpm build
+pm2 start ecosystem.config.cjs
+pm2 save
+curl http://127.0.0.1:43127/api/health
+```
+
+如果升级包含数据库结构变更，代码回滚和数据库回滚必须一起评估。不能只回滚代码而忽略数据库版本。
+
+## 12. 日常检查
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+pm2 status
+curl http://127.0.0.1:43127/api/health
+df -h
+du -sh apps/api/data
+du -sh /root/.pm2/logs
+nginx -t
+systemctl status nginx --no-pager
+```
+
+可选安装 PM2 日志轮转：
+
+```bash
 pm2 install pm2-logrotate
 pm2 set pm2-logrotate:max_size 20M
 pm2 set pm2-logrotate:retain 14
 pm2 set pm2-logrotate:compress true
+pm2 save
 ```
 
-如果暂不安装日志轮转，至少每周检查日志目录大小，并在确认已备份后清理旧日志。不要清理数据库文件。
+## 13. 故障排查
 
-### 11.5 磁盘和数据库检查
+### 13.1 `node: command not found`
 
-```powershell
-Get-PSDrive -PSProvider FileSystem
-Get-ChildItem apps\api\data -Force | Select-Object Name,Length,LastWriteTime
-```
+说明 Node.js 没有安装或 PATH 没有生效：
 
-SQLite 数据库出现异常时，先备份现场，再进行只读完整性检查：
-
-```powershell
-sqlite3.exe apps\api\data\erp-mes.db "PRAGMA integrity_check;"
-```
-
-返回 `ok` 才表示 SQLite 结构检查通过；业务数据正确性仍需通过系统页面和业务台账核对。
-
-## 12. 故障排查
-
-### 12.1 登录请求失败
-
-先检查 API 是否运行：
-
-```powershell
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:43127/api/health
-pm2 status
-pm2 logs memory-erp-mes-api --lines 100
-```
-
-- 健康检查连接失败：API 未启动、端口被占用或进程崩溃。
-- 健康检查正常但前端失败：检查 IIS/Nginx 的 `/api` 代理和浏览器请求地址。
-- 返回“账号或密码错误”：核对账号状态和密码，不要直接重置数据库。
-- 返回“必须先修改初始密码”：使用当前初始密码修改一个符合要求的新密码。
-- 返回 CORS 错误：检查前端地址是否为 `43128`，并同步 API CORS 白名单。
-
-### 12.2 `EADDRINUSE` 端口被占用
-
-```powershell
-Get-NetTCPConnection -LocalPort 43127 -State Listen -ErrorAction SilentlyContinue |
-  Select-Object LocalPort,OwningProcess
-Get-Process -Id <进程号>
-```
-
-确认是本项目重复进程后，使用 PM2 管理的服务应执行：
-
-```powershell
-pm2 restart memory-erp-mes-api
-```
-
-不要随意结束所有 Node.js 进程。
-
-### 12.3 `better_sqlite3.node` 加载失败
-
-```powershell
+```bash
+which node
 node --version
-pnpm --version
-pnpm rebuild better-sqlite3
-pnpm --filter @memory/api typecheck
+apt-get update
+curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+apt-get install -y nodejs
 ```
 
-确认 API 使用的是当前项目的 `node_modules`，并且 Node.js 版本没有频繁切换。
+### 13.2 `pnpm: command not found`
 
-### 12.4 API 启动后立即退出
+```bash
+corepack enable
+corepack prepare pnpm@10.15.0 --activate
+pnpm --version
+```
 
-```powershell
+### 13.3 `pm2: command not found`
+
+```bash
+npm install --global pm2
+pm2 --version
+```
+
+### 13.4 `better_sqlite3.node` 加载失败
+
+不要删除数据库，先重新编译当前 Linux 环境的原生依赖：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+apt-get install -y build-essential python3 make g++
+pnpm rebuild better-sqlite3
+pnpm install --frozen-lockfile
+pm2 restart memory-erp-mes-api --update-env
+```
+
+### 13.5 API 启动失败
+
+```bash
 pm2 logs memory-erp-mes-api --err --lines 200
 ```
 
-常见原因：
+重点检查：
 
-- `.env` 中正式环境缺少 `INITIAL_ADMIN_PASSWORD`。
-- `PORT` 非数字或端口已被占用。
-- SQLite 文件目录无读写权限。
-- 原生模块和 Node.js ABI 不匹配。
-- 新版本数据库升级失败。
+- `apps/api/.env` 是否存在且权限为 `600`。
+- `NODE_ENV=production` 时是否配置 `INITIAL_ADMIN_PASSWORD`。
+- 43127 是否被其他程序占用。
+- `apps/api/data` 是否可读写。
+- Node.js 主版本与安装依赖时是否一致。
 
-保留错误日志和数据库副本后再处理，不要先删除 `apps/api/data`。
+### 13.6 登录请求失败
 
-### 12.5 前端页面空白或接口 404
+先分层检查：
 
-- 确认 `apps/web/dist/index.html` 存在。
-- 确认 IIS/Nginx 根目录指向 `apps/web/dist`。
-- SPA 路由必须回退到 `index.html`。
-- `/api` 必须代理到 `http://127.0.0.1:43127`。
-- 重新执行 `pnpm build`，确认构建无错误。
+```bash
+curl http://127.0.0.1:43127/api/health
+pm2 status
+pm2 logs memory-erp-mes-api --lines 100
+curl -I http://127.0.0.1/
+```
 
-## 13. 权限和数据安全基线
+- API 健康检查失败：检查 PM2、端口、环境变量和 SQLite 原生模块。
+- API 健康检查正常但页面请求失败：检查 Nginx `/api/` 代理。
+- 页面能打开但提示账号密码错误：核对账号状态和密码。
+- 首次登录提示必须修改密码：使用 `INITIAL_ADMIN_PASSWORD` 登录后修改。
 
-- 系统总管理员只授予极少数可信人员。
-- 部门经理可管理其授权部门，不默认拥有其他部门数据权限。
-- 普通员工只授予岗位必需的查看、创建或执行权限。
-- 角色调整后使用不同账号实际验证菜单和接口，不以“按钮隐藏”作为唯一判断。
-- 生产操作、库存过账、审批、报废和权限修改必须保留操作审计。
-- 不允许负库存；异常库存必须通过盘点、调拨、报废等有审计的业务流程处理。
-- 生产报工中投放、合格、不良、维修合格、维修不良和报废数量必须满足业务数量平衡。
-- 备份文件与 `.env` 文件不能放在前端静态目录。
-- 生产 API 端口只监听内网或本机，公网访问由 HTTPS 网关承接。
+### 13.7 端口冲突
 
-## 14. 版本发布记录模板
+```bash
+ss -lntp | grep -E ':43127|:80|:443'
+```
 
-每次发布建议填写以下信息：
+确认属于本项目的旧进程后优先使用：
+
+```bash
+pm2 restart memory-erp-mes-api
+```
+
+不要随意执行 `killall node`，以免影响服务器上的其他项目。
+
+### 13.8 前端空白或接口 404
+
+检查：
+
+```bash
+test -f /root/Memory-Modules-ERP-MES/apps/web/dist/index.html
+nginx -t
+curl -I http://127.0.0.1/
+curl http://127.0.0.1/api/health
+```
+
+确认 Nginx 根目录为 `apps/web/dist`，并且 `/api/` 代理目标为 `127.0.0.1:43127`。SPA 路由必须保留 `try_files ... /index.html`。
+
+## 14. 权限和数据安全
+
+- 系统总管理员只授予少数可信人员。
+- 部门经理可以管理被授权的一个或多个部门。
+- 普通员工只授予岗位必需的查看、创建和执行权限。
+- 角色权限调整后，必须用系统管理员、部门经理、普通员工账号分别验证菜单和接口。
+- 库存不允许负库存；库存变化必须通过入库、出库、调拨、盘点或报废单据产生。
+- 生产报工必须满足投放、合格、不良、维修合格、维修不良和报废数量平衡。
+- 生产工单的暂停、继续、停止、终止、关闭和删除必须遵守状态规则。
+- 商品、仓库、库存单据、生产工单、维修和权限修改必须保留审计记录。
+- `.env`、SQLite 数据库和备份文件不得放进前端静态目录。
+- API 端口只允许本机或内网访问，公网通过 Nginx HTTPS 访问。
+
+## 15. Windows 本地开发
+
+本节只用于开发人员在 Windows 电脑运行源码，不用于 Linux 生产部署。
+
+安装 Node.js 24 后，在 PowerShell 执行：
+
+```powershell
+corepack enable
+corepack prepare pnpm@10.15.0 --activate
+pnpm add --global pm2
+```
+
+进入项目目录：
+
+```powershell
+Set-Location D:\软件开发项目\Memory-Modules-ERP-MES
+pnpm install
+```
+
+同时启动前后端开发服务器：
+
+```powershell
+pnpm dev
+```
+
+开发地址：
+
+- 前端：`http://localhost:43128`
+- API 健康检查：`http://localhost:43127/api/health`
+
+也可以分开启动，但仅限开发调试：
+
+```powershell
+# 后端
+pnpm --filter @memory/api dev
+
+# 另开一个 PowerShell 窗口启动前端
+pnpm --filter @memory/web dev
+```
+
+开发环境的数据库路径为当前 API 工作目录下的 `data/erp-mes.db`。生产环境使用 PM2 配置的 `apps/api` 工作目录，路径为 `/root/Memory-Modules-ERP-MES/apps/api/data/erp-mes.db`。
+
+## 16. 发布前验收
+
+每次发布至少执行：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+pnpm typecheck
+pnpm build
+pm2 restart memory-erp-mes-api --update-env
+curl http://127.0.0.1:43127/api/health
+```
+
+业务验收至少包括：
+
+- 登录、退出登录、修改初始密码。
+- 系统总管理员、部门经理、普通员工的权限边界。
+- 商品分类树、商品属性、商品资料和采购价/销售价。
+- 仓库地址、仓库类型、库位和库存查询。
+- 入库、出库、调拨、盘点、报废及单据预览、打印、下载。
+- 生产计划、生产工单、暂停、继续、停止、终止、关闭和删除规则。
+- 芯片测试、不良维修、维修进度、维修报废和报废产品。
+- 库存余额、库存台账、工单数量平衡和操作审计。
+
+## 17. 发布记录模板
 
 ```text
 版本号：
@@ -692,27 +734,3 @@ pm2 logs memory-erp-mes-api --err --lines 200
 回滚版本：
 异常记录：
 ```
-
-## 15. 当前验证命令
-
-提交代码或发布前至少执行：
-
-```powershell
-pnpm typecheck
-pnpm build
-```
-
-启动后执行：
-
-```powershell
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:43127/api/health
-```
-
-## 16. 后续建设方向
-
-1. 完善班组、工位、设备和更细的数据范围授权。
-2. 建立物料、产品、BOM、工艺路线和测试规范主数据闭环。
-3. 完善生产派工、工序报工、工序数据采集和设备接口。
-4. 完善质量检验、不良、维修、复测、放行和批次追溯。
-5. 增加报表、统计分析、导入导出、消息通知和接口集成。
-6. 增加正式数据库迁移工具、自动备份任务、恢复演练和发布流水线。
