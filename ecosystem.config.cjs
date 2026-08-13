@@ -8,7 +8,7 @@ module.exports = {
       name: "memory-erp-mes-api",
       cwd: path.join(projectRoot, "apps", "api"),
       script: "dist/index.js",
-      interpreter: "node",
+      interpreter: process.env.NODE_BINARY || process.execPath,
       node_args: "--env-file=.env",
       instances: 1,
       exec_mode: "fork",

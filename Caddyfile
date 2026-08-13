@@ -1,6 +1,6 @@
-# 将 erp.example.com 替换为实际域名。
+# 生产域名：erp.ossgar.com
 # 使用真实域名时，Caddy 会自动申请和续期 HTTPS 证书。
-erp.example.com {
+erp.ossgar.com {
     encode gzip zstd
 
     handle /api/* {

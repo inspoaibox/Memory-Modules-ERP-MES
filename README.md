@@ -49,7 +49,7 @@ Caddy : 80/443
 | 项目 | 当前值 |
 | --- | --- |
 | Node.js | 24.x，建议生产与开发保持同一主版本 |
-| pnpm | 10.15.0 |
+| pnpm | 10.26.0 |
 | API | 43127 |
 | 前端开发服务器 | 43128，仅本地开发使用 |
 | 生产入口 | Caddy 80/443 |
@@ -117,11 +117,11 @@ node --version
 npm --version
 ```
 
-### 3.4 安装 pnpm 10.15.0
+### 3.4 安装 pnpm 10.26.0
 
 ```bash
 corepack enable
-corepack prepare pnpm@10.15.0 --activate
+corepack prepare pnpm@10.26.0 --activate
 pnpm --version
 ```
 
@@ -130,7 +130,7 @@ pnpm --version
 ```bash
 npm install --global corepack
 corepack enable
-corepack prepare pnpm@10.15.0 --activate
+corepack prepare pnpm@10.26.0 --activate
 pnpm --version
 ```
 
@@ -192,6 +192,40 @@ ls -la
 cd /root/Memory-Modules-ERP-MES
 pnpm install --frozen-lockfile
 ```
+
+如果安装结果出现：
+
+```text
+Ignored build scripts: better-sqlite3, esbuild
+```
+
+项目在 `pnpm-workspace.yaml` 中通过 `allowBuilds` 放行这两个原生依赖的安装构建脚本。该配置要求 pnpm `10.26.0` 或更高的 10.x 版本；服务器升级 pnpm 后重新安装和构建：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+corepack prepare pnpm@10.26.0 --activate
+hash -r
+pnpm --version
+pnpm install --force
+pnpm rebuild better-sqlite3 esbuild
+```
+
+确认 `pnpm-workspace.yaml` 中包含：
+
+```yaml
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+```
+
+不要只用 `require('better-sqlite3')` 判断成功，必须实际创建 SQLite 实例：
+
+```bash
+cd /root/Memory-Modules-ERP-MES/apps/api
+node -e "const Database=require('better-sqlite3'); const db=new Database(':memory:'); console.log('better-sqlite3 runtime OK'); db.close()"
+```
+
+只有看到 `better-sqlite3 runtime OK` 后，才启动 PM2。
 
 如果出现原生模块错误：
 
@@ -329,6 +363,14 @@ ls -lh /root/Memory-Modules-ERP-MES/apps/api/data
 pm2 logs memory-erp-mes-api --lines 100
 ```
 
+如果服务器同时安装了多个 Node.js 版本，启动前先把当前 Node.js 的绝对路径传给 PM2：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+NODE_BINARY="$(readlink -f "$(command -v node)")"
+NODE_BINARY="$NODE_BINARY" pm2 start ecosystem.config.cjs
+```
+
 首次初始化完成后，使用账号 `admin` 和 `.env` 中的 `INITIAL_ADMIN_PASSWORD` 登录，然后立即修改密码。
 
 ### 7.3 如果提示 `ecosystem.config.cjs not found`
@@ -367,21 +409,23 @@ pm2 save
 pm2 status
 ```
 
-如果需要立即启动、但暂时无法同步配置文件，可以直接使用等效的 PM2 命令：
+如果需要立即启动、但暂时无法同步配置文件，可以直接使用等效的 PM2 命令。注意必须让 PM2 和 `better-sqlite3` 使用同一个 Node.js 可执行文件：
 
 ```bash
 cd /root/Memory-Modules-ERP-MES
-pm2 start apps/api/dist/index.js \
+NODE_BIN="$(readlink -f "$(command -v node)")"
+PATH="$(dirname "$NODE_BIN"):$PATH" NODE_BINARY="$NODE_BIN" pm2 start /root/Memory-Modules-ERP-MES/apps/api/dist/index.js \
   --name memory-erp-mes-api \
   --cwd /root/Memory-Modules-ERP-MES/apps/api \
-  --node-args="--env-file=.env" \
+  --interpreter "$NODE_BIN" \
+  --node-args="--env-file=/root/Memory-Modules-ERP-MES/apps/api/.env" \
   --time \
   --max-memory-restart 512M
 pm2 save
 pm2 status
 ```
 
-这个临时命令和 `ecosystem.config.cjs` 使用相同的 API 工作目录、环境变量文件、进程名和内存限制。配置文件同步后，不要重复启动第二个 API 进程；先检查：
+这个临时命令和 `ecosystem.config.cjs` 使用相同的 API 工作目录、环境变量文件、进程名和内存限制。配置文件同步后，项目配置会自动使用启动 PM2 的 `process.execPath`，避免 Node.js 22/24 ABI 不一致。不要重复启动第二个 API 进程；先检查：
 
 ```bash
 pm2 status
@@ -408,7 +452,7 @@ setfacl -m u:caddy:--x /root/Memory-Modules-ERP-MES/apps/web
 setfacl -R -m u:caddy:rX /root/Memory-Modules-ERP-MES/apps/web/dist
 ```
 
-项目根目录已经提供 `Caddyfile` 模板。先把其中的 `erp.example.com` 替换成真实域名；如果暂时只用 IP，可改成 `:80`，但不会自动申请公网 HTTPS 证书：
+项目根目录已经提供 `Caddyfile`，当前生产域名为 `erp.ossgar.com`。如果更换域名，需要同步修改 Caddyfile；如果暂时只用 IP，可改成 `:80`，但不会自动申请公网 HTTPS 证书：
 
 ```bash
 cd /root/Memory-Modules-ERP-MES
@@ -631,7 +675,7 @@ apt-get install -y nodejs
 
 ```bash
 corepack enable
-corepack prepare pnpm@10.15.0 --activate
+corepack prepare pnpm@10.26.0 --activate
 pnpm --version
 ```
 
@@ -649,9 +693,10 @@ pm2 --version
 ```bash
 cd /root/Memory-Modules-ERP-MES
 apt-get install -y build-essential python3 make g++
-pnpm rebuild better-sqlite3
-pnpm install --frozen-lockfile
-pm2 restart memory-erp-mes-api --update-env
+pnpm install --force
+pnpm rebuild better-sqlite3 esbuild
+cd apps/api
+node -e "const Database=require('better-sqlite3'); const db=new Database(':memory:'); console.log('better-sqlite3 runtime OK'); db.close()"
 ```
 
 ### 13.5 API 启动失败
@@ -710,6 +755,109 @@ curl http://127.0.0.1/api/health
 ```
 
 确认 Caddy 根目录为 `apps/web/dist`，并且 `/api/*` 代理目标为 `127.0.0.1:43127`。SPA 路由必须保留 `try_files {path} /index.html`。
+
+### 13.9 首页返回 HTTP 403
+
+403 通常表示 Caddy 进程没有权限读取 `/root/Memory-Modules-ERP-MES/apps/web/dist`，或 `/etc/caddy/Caddyfile` 的域名没有配置为当前访问域名。依次执行：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+grep -n . /etc/caddy/Caddyfile
+namei -l /root/Memory-Modules-ERP-MES/apps/web/dist/index.html
+test -f apps/web/dist/index.html
+```
+
+确认配置第一行是：
+
+```caddyfile
+erp.ossgar.com {
+```
+
+给 Caddy 只读前端目录权限：
+
+```bash
+apt-get install -y acl
+setfacl -m u:caddy:--x /root
+setfacl -m u:caddy:--x /root/Memory-Modules-ERP-MES
+setfacl -m u:caddy:--x /root/Memory-Modules-ERP-MES/apps
+setfacl -m u:caddy:--x /root/Memory-Modules-ERP-MES/apps/web
+setfacl -R -m u:caddy:rX /root/Memory-Modules-ERP-MES/apps/web/dist
+sudo -u caddy test -r /root/Memory-Modules-ERP-MES/apps/web/dist/index.html
+```
+
+重新校验并加载：
+
+```bash
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+systemctl reload caddy
+journalctl -u caddy -n 100 --no-pager
+curl -I -H 'Host: erp.ossgar.com' http://127.0.0.1/
+```
+
+如果日志出现 `permission denied`，继续检查 `/root`、项目目录和 `dist` 目录的权限；不要给 Caddy 开放 `.env` 或 `apps/api/data`。
+
+### 13.10 `better_sqlite3.node` 加载失败
+
+日志中如果出现 `node-v137-linux-x64`、`Cannot find module better_sqlite3.node` 或 `new Database` 启动失败，说明原生模块没有按当前 Linux 的 Node.js 版本安装。API 不会正常启动，Caddy 的 `/api/*` 也无法反代。
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+node --version
+node -p "process.versions.modules"
+pnpm --version
+apt-get install -y build-essential python3 make g++
+corepack prepare pnpm@10.26.0 --activate
+hash -r
+pnpm install --force
+pnpm rebuild better-sqlite3 esbuild
+cd apps/api
+node -e "const Database=require('better-sqlite3'); const db=new Database(':memory:'); console.log('better-sqlite3 runtime OK'); db.close()"
+```
+
+如果重编译仍失败：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+corepack prepare pnpm@10.26.0 --activate
+hash -r
+pnpm install --force
+pnpm rebuild better-sqlite3 esbuild
+cd apps/api
+node -e "const Database=require('better-sqlite3'); const db=new Database(':memory:'); console.log('better-sqlite3 runtime OK'); db.close()"
+```
+
+确认模块加载成功后，再重启 PM2：
+
+```bash
+pm2 status
+pm2 restart memory-erp-mes-api --update-env
+curl http://127.0.0.1:43127/api/health
+pm2 logs memory-erp-mes-api --lines 100
+```
+
+如果手动执行 `node -e "require('better-sqlite3')"` 成功，但 PM2 启动后 `curl http://127.0.0.1:43127/api/health` 仍然连接失败，检查 PM2 和当前终端使用的 Node.js 是否一致：
+
+```bash
+command -v node
+node --version
+readlink -f "$(command -v node)"
+pm2 report | grep -E "Node.js version|Runtime Binary"
+```
+
+如果终端是 Node.js 24、PM2 却显示 Node.js 22，执行：
+
+```bash
+cd /root/Memory-Modules-ERP-MES
+NODE_BIN="$(readlink -f "$(command -v node)")"
+pm2 delete memory-erp-mes-api 2>/dev/null || true
+PATH="$(dirname "$NODE_BIN"):$PATH" NODE_BINARY="$NODE_BIN" pm2 start /root/Memory-Modules-ERP-MES/apps/api/dist/index.js \
+  --name memory-erp-mes-api \
+  --cwd /root/Memory-Modules-ERP-MES/apps/api \
+  --interpreter "$NODE_BIN" \
+  --node-args="--env-file=/root/Memory-Modules-ERP-MES/apps/api/.env"
+pm2 save
+curl http://127.0.0.1:43127/api/health
+```
 
 ## 14. 权限和数据安全
 

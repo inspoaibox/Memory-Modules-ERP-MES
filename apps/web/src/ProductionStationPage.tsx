@@ -1,6 +1,6 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Check, ClipboardCheck, Download, Eye, Play, Printer, RefreshCw, Search, ShieldAlert, X } from "lucide-react";
-import { User, request } from "./api";
+import { useEffect, useMemo, useState } from "react";
+import { Check, ClipboardCheck, Download, Eye, FilePlus2, Play, Printer, RefreshCw, Search, ShieldAlert, X } from "lucide-react";
+import { Department, User, request } from "./api";
 import { downloadProductionTask, printProductionTask, ProductionTaskDetail, ProductionTaskDetailModal } from "./ProductionPage";
 import {
   createDefaultOperationData,
@@ -10,7 +10,13 @@ import {
   type OperationRow
 } from "./productionOperationTemplates";
 import { ChipTestRowsEditor } from "./ChipTestRowsEditor";
-import { OperationFieldsTable, ProductionReportEntryTable, type ReportEntryForm } from "./ProductionEntryTable";
+import {
+  OperationFieldsTable,
+  ProductionReportEntryTable,
+  ProductionWorkOrderEntryTable,
+  type ReportEntryForm,
+  type WorkOrderEntryForm
+} from "./ProductionEntryTable";
 
 export type ProductionStationKey =
   | "bga"
@@ -27,6 +33,7 @@ type WorkOrderExecutionStatus = "normal" | "paused" | "terminated";
 type WorkOrderTerminationType = "" | "stop" | "terminate";
 type QualityCheckStatus = "pending" | "passed" | "failed";
 type ProcessType = "manufacturing" | "testing" | "outsourcing" | "repair" | "warehouse" | "inspection";
+type WorkOrderPriority = "low" | "normal" | "urgent";
 
 type ProductionTask = {
   id: number;
@@ -81,6 +88,29 @@ type StationDefinition = {
   title: string;
   description: string;
   qualityGate: boolean;
+};
+
+type ProductItem = {
+  id: number;
+  itemCode: string;
+  name: string;
+  status: "active" | "inactive";
+};
+
+type ProductionRoute = {
+  id: number;
+  code: string;
+  name: string;
+  status: "active" | "inactive";
+};
+
+type Operator = {
+  id: number;
+  displayName: string;
+  employeeNo: string;
+  position: string;
+  departmentId: number | null;
+  departmentName: string | null;
 };
 
 const stations: Record<ProductionStationKey, StationDefinition> = {
@@ -184,8 +214,11 @@ function StationTasksPanel({ currentUser, station }: { currentUser: User; statio
   const [statusFilter, setStatusFilter] = useState<"all" | TaskStatus>("all");
   const [reporting, setReporting] = useState<ProductionTask | null>(null);
   const [detail, setDetail] = useState<ProductionTaskDetail | null>(null);
+  const [showWorkOrderForm, setShowWorkOrderForm] = useState(false);
   const [error, setError] = useState("");
   const canExecute = hasPermission(currentUser, "production.operations.execute");
+  const canCreateWorkOrder = hasPermission(currentUser, "production.workorders.manage")
+    && (isSystemAdmin(currentUser) || currentUser.authorizedProcessCodes.includes(station.processCode));
 
   const load = () => {
     const params = new URLSearchParams({ processCode: station.processCode });
@@ -253,7 +286,10 @@ function StationTasksPanel({ currentUser, station }: { currentUser: User; statio
     <section className="panel">
       <div className="panel-heading">
         <div><span className="eyebrow">本工位任务</span><h2>{station.title}</h2><p>只显示当前工位的任务，不与其他生产环节混合。</p></div>
-        <button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />刷新</button>
+        <div className="header-actions">
+          <button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />刷新</button>
+          {canCreateWorkOrder && <button className="primary-button" onClick={() => setShowWorkOrderForm(true)}><FilePlus2 size={16} />新建本工序工单</button>}
+        </div>
       </div>
       <div className="toolbar">
         <div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索任务、工单、商品或执行员工" /></div>
@@ -270,7 +306,108 @@ function StationTasksPanel({ currentUser, station }: { currentUser: User; statio
       </tbody></table></div>
       {reporting && <StationReportModal task={reporting} onClose={() => setReporting(null)} onSaved={() => { setReporting(null); void load(); }} />}
       {detail && <ProductionTaskDetailModal detail={detail} onClose={() => setDetail(null)} onPrint={() => { printProductionTask(detail); void recordTaskOutput(detail.item.id, "print"); }} onDownload={() => { downloadProductionTask(detail); void recordTaskOutput(detail.item.id, "download"); }} />}
+      {showWorkOrderForm && <StationWorkOrderForm station={station} onClose={() => setShowWorkOrderForm(false)} onSaved={() => { setShowWorkOrderForm(false); void load(); }} />}
     </section>
+  );
+}
+
+function StationWorkOrderForm({ station, onClose, onSaved }: { station: StationDefinition; onClose: () => void; onSaved: () => void }) {
+  const [products, setProducts] = useState<ProductItem[]>([]);
+  const [routes, setRoutes] = useState<ProductionRoute[]>([]);
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [operators, setOperators] = useState<Operator[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState<WorkOrderEntryForm>({
+    lines: [{ productItemId: "", routeId: "", plannedQuantity: "", remark: "" }],
+    departmentId: "",
+    managerUserId: "",
+    priority: "normal",
+    plannedStartDate: today(),
+    plannedEndDate: "",
+    remark: ""
+  });
+
+  useEffect(() => {
+    let active = true;
+    void Promise.all([
+      request<{ items: ProductItem[] }>("/inventory/items"),
+      request<{ items: ProductionRoute[] }>(`/production/routes?processCode=${encodeURIComponent(station.processCode)}`),
+      request<{ items: Department[] }>("/departments"),
+      request<{ items: Operator[] }>("/production/operators")
+    ])
+      .then(([productResult, routeResult, departmentResult, operatorResult]) => {
+        if (!active) return;
+        setProducts(productResult.items.filter((item) => item.status === "active"));
+        setRoutes(routeResult.items.filter((route) => route.status === "active"));
+        setDepartments(departmentResult.items.filter((department) => department.status === "active"));
+        setOperators(operatorResult.items);
+      })
+      .catch((loadError) => {
+        if (active) setError(errorMessage(loadError));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [station.processCode]);
+
+  const submit = async () => {
+    setError("");
+    setSaving(true);
+    try {
+      await request(`/production/processes/${encodeURIComponent(station.processCode)}/work-orders`, {
+        method: "POST",
+        body: JSON.stringify({
+          items: form.lines.map((line) => ({
+            productItemId: Number(line.productItemId),
+            routeId: Number(line.routeId),
+            plannedQuantity: Number(line.plannedQuantity),
+            remark: line.remark
+          })),
+          departmentId: Number(form.departmentId),
+          managerUserId: form.managerUserId ? Number(form.managerUserId) : null,
+          priority: form.priority as WorkOrderPriority,
+          plannedStartDate: form.plannedStartDate,
+          plannedEndDate: form.plannedEndDate,
+          remark: form.remark
+        })
+      });
+      onSaved();
+    } catch (submitError) {
+      setError(errorMessage(submitError));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <StationModal title={`新建${station.title}工单`} onClose={onClose}>
+      <form className="modal-form" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+        <div className="form-note">从当前工序直接发起并下达。系统只接受包含“{station.title}”的工艺路线，并从当前工序生成首个待开工任务，后续工序继续按该路线流转。</div>
+        {loading
+          ? <div className="form-note">正在加载商品、路线与部门配置...</div>
+          : <ProductionWorkOrderEntryTable
+              form={form}
+              products={products}
+              routes={routes}
+              departments={departments}
+              operators={operators}
+              priorities={[
+                { value: "low", label: "低" },
+                { value: "normal", label: "普通" },
+                { value: "urgent", label: "紧急" }
+              ]}
+              onChange={setForm}
+            />}
+        {error && <div className="form-error">{error}</div>}
+        <div className="modal-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>取消</button>
+          <button className="primary-button" disabled={loading || saving}>{saving ? "创建中..." : "创建并下达"} <Check size={16} /></button>
+        </div>
+      </form>
+    </StationModal>
   );
 }
 

@@ -107,7 +107,7 @@ export const permissionDependencies: Record<string, string[]> = {
   "inventory.attributes.manage": ["inventory.attributes.view"],
   "inventory.items.manage": ["inventory.items.view"],
   "inventory.warehouses.manage": ["inventory.warehouses.view", "system.departments.view"],
-  "production.workorders.manage": ["production.workorders.view", "production.routes.view", "inventory.items.view", "system.departments.view"],
+  "production.workorders.manage": ["production.workorders.view", "production.routes.view", "production.tasks.view", "inventory.items.view", "system.departments.view"],
   "inventory.receipts.create": ["inventory.documents.view", "inventory.items.view", "inventory.warehouses.view"],
   "inventory.receipts.approve": ["inventory.documents.view"],
   "inventory.receipts.post": ["inventory.documents.view"],
@@ -450,6 +450,7 @@ export function initializeDatabase() {
       work_order_no TEXT NOT NULL UNIQUE,
       product_item_id INTEGER REFERENCES items(id) ON DELETE RESTRICT,
       route_id INTEGER REFERENCES production_routes(id) ON DELETE RESTRICT,
+      start_process_id INTEGER REFERENCES production_processes(id) ON DELETE RESTRICT,
       department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE RESTRICT,
       manager_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
       planned_quantity REAL NOT NULL DEFAULT 0 CHECK (planned_quantity >= 0),
@@ -659,6 +660,9 @@ export function initializeDatabase() {
   }
   if (!workOrderColumns.some((column) => column.name === "route_id")) {
     db.exec("ALTER TABLE production_work_orders ADD COLUMN route_id INTEGER REFERENCES production_routes(id) ON DELETE RESTRICT");
+  }
+  if (!workOrderColumns.some((column) => column.name === "start_process_id")) {
+    db.exec("ALTER TABLE production_work_orders ADD COLUMN start_process_id INTEGER REFERENCES production_processes(id) ON DELETE RESTRICT");
   }
   if (!workOrderColumns.some((column) => column.name === "planned_quantity")) {
     db.exec("ALTER TABLE production_work_orders ADD COLUMN planned_quantity REAL NOT NULL DEFAULT 0");

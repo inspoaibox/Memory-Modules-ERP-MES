@@ -89,6 +89,9 @@ type WorkOrderRow = {
   routeId: number;
   routeName: string;
   routeProductItemId: number | null;
+  startProcessId: number | null;
+  startProcessCode: string | null;
+  startProcessName: string | null;
   departmentId: number;
   departmentName: string;
   managerUserId: number | null;
@@ -392,8 +395,12 @@ function assertRepairOwnerEligibility(userId: number, task: TaskRow) {
 
 function assertProcessCodeAuthorization(userId: number, processCode: string) {
   const process = db
-    .prepare("SELECT id FROM production_processes WHERE code = ? AND status = 'active'")
-    .get(processCode) as { id: number } | undefined;
+    .prepare(
+      `SELECT id, code, name, process_type AS processType, status
+       FROM production_processes
+       WHERE code = ? AND status = 'active'`
+    )
+    .get(processCode) as ProcessRow | undefined;
   if (!process) throw businessError("工序不存在或已停用", 404);
   if (!isSystemAdmin(userId) && !isUserAuthorizedForProcess(userId, process.id)) {
     throw businessError("当前账号没有该工序授权", 403);
@@ -467,6 +474,8 @@ function getWorkOrder(id: number) {
       `SELECT wo.id, wo.work_order_no AS workOrderNo, wo.product_item_id AS productItemId,
               i.item_code AS productItemCode, i.name AS productItemName,
               wo.route_id AS routeId, r.name AS routeName, r.product_item_id AS routeProductItemId,
+              wo.start_process_id AS startProcessId, start_process.code AS startProcessCode,
+              start_process.name AS startProcessName,
               wo.department_id AS departmentId, d.name AS departmentName,
               wo.manager_user_id AS managerUserId, manager.display_name AS managerName,
               wo.planned_quantity AS plannedQuantity, wo.status,
@@ -479,6 +488,7 @@ function getWorkOrder(id: number) {
        FROM production_work_orders wo
        INNER JOIN items i ON i.id = wo.product_item_id
        INNER JOIN production_routes r ON r.id = wo.route_id
+       LEFT JOIN production_processes start_process ON start_process.id = wo.start_process_id
        INNER JOIN departments d ON d.id = wo.department_id
        LEFT JOIN users manager ON manager.id = wo.manager_user_id
        INNER JOIN users creator ON creator.id = wo.created_by
@@ -1256,6 +1266,180 @@ function normalizeRouteSteps(
   });
 }
 
+type WorkOrderItemInput = {
+  productItemId?: number;
+  routeId?: number;
+  plannedQuantity?: number;
+  remark?: string;
+};
+
+type WorkOrderCreateInput = {
+  items?: WorkOrderItemInput[];
+  productItemId?: number;
+  routeId?: number;
+  plannedQuantity?: number;
+  departmentId?: number;
+  managerUserId?: number | null;
+  priority?: WorkOrderPriority;
+  plannedStartDate?: string;
+  plannedEndDate?: string;
+  remark?: string;
+};
+
+type NormalizedWorkOrderItem = {
+  productItemId: number;
+  productItemCode: string;
+  routeId: number;
+  plannedQuantity: number;
+  remark: string;
+};
+
+function validateWorkOrderHeader(actorUserId: number, body: WorkOrderCreateInput) {
+  const departmentId = parseId(body.departmentId, "生产部门");
+  getActiveDepartment(departmentId, "生产部门");
+  if (!canAccessDepartment(actorUserId, departmentId)) {
+    throw businessError("当前账号没有该生产部门的数据范围", 403);
+  }
+  const managerUserId = parseOptionalId(body.managerUserId, "工单负责人");
+  if (managerUserId) {
+    const manager = getActiveUser(managerUserId);
+    if (!manager || manager.status !== "active" || !canAccessDepartment(managerUserId, departmentId)) {
+      throw businessError("工单负责人必须是该生产部门范围内的启用员工");
+    }
+  }
+  return { departmentId, managerUserId };
+}
+
+function normalizeWorkOrderItems(body: WorkOrderCreateInput, startProcess: ProcessRow | null = null) {
+  const sourceItems = body.items?.length
+    ? body.items
+    : [{
+        productItemId: body.productItemId,
+        routeId: body.routeId,
+        plannedQuantity: body.plannedQuantity,
+        remark: ""
+      }];
+  if (!sourceItems.length) throw businessError("生产工单至少需要一行产品明细");
+  const seenItemRoutes = new Set<string>();
+  return sourceItems.map((line, index) => {
+    const productItemId = parseId(line.productItemId, `第 ${index + 1} 行生产商品`);
+    const routeId = parseId(line.routeId, `第 ${index + 1} 行工艺路线`);
+    const plannedQuantity = parseQuantity(line.plannedQuantity, `第 ${index + 1} 行计划数量`);
+    const item = getItem(productItemId);
+    const route = getRoute(routeId);
+    if (!item || item.status !== "active") throw businessError(`第 ${index + 1} 行生产商品不存在或已停用`);
+    if (!route || route.status !== "active") throw businessError(`第 ${index + 1} 行工艺路线不存在或已停用`);
+    if (route.productItemId !== null && route.productItemId !== productItemId) {
+      throw businessError(`第 ${index + 1} 行工艺路线不适用于当前生产商品`);
+    }
+    const steps = getRouteSteps(routeId);
+    if (!steps.length) throw businessError(`第 ${index + 1} 行工艺路线未配置工序步骤`);
+    if (startProcess && !steps.some((step) => step.processId === startProcess.id)) {
+      throw businessError(`第 ${index + 1} 行工艺路线不包含当前工序“${startProcess.name}”`);
+    }
+    const itemRouteKey = `${productItemId}:${routeId}`;
+    if (seenItemRoutes.has(itemRouteKey)) throw businessError(`第 ${index + 1} 行生产商品和工艺路线重复`);
+    seenItemRoutes.add(itemRouteKey);
+    return {
+      productItemId,
+      productItemCode: item.itemCode,
+      routeId,
+      plannedQuantity,
+      remark: line.remark?.trim() ?? ""
+    };
+  });
+}
+
+function insertWorkOrderRecord(
+  body: WorkOrderCreateInput,
+  header: { departmentId: number; managerUserId: number | null },
+  items: NormalizedWorkOrderItem[],
+  createdBy: number,
+  startProcessId: number | null = null
+) {
+  const firstItem = items[0];
+  const result = db
+    .prepare(
+      `INSERT INTO production_work_orders
+       (work_order_no, product_item_id, route_id, start_process_id, department_id, manager_user_id,
+        planned_quantity, priority, planned_start_date, planned_end_date, remark, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      nextDailyCode("MO", "production_work_orders", "work_order_no"),
+      firstItem.productItemId,
+      firstItem.routeId,
+      startProcessId,
+      header.departmentId,
+      header.managerUserId,
+      firstItem.plannedQuantity,
+      body.priority ?? "normal",
+      body.plannedStartDate ?? "",
+      body.plannedEndDate ?? "",
+      body.remark?.trim() ?? "",
+      createdBy
+    );
+  const id = Number(result.lastInsertRowid);
+  const insertItem = db.prepare(
+    `INSERT INTO production_work_order_items
+     (work_order_id, line_no, product_item_id, route_id, planned_quantity, remark)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  );
+  items.forEach((line, index) => {
+    insertItem.run(id, index + 1, line.productItemId, line.routeId, line.plannedQuantity, line.remark);
+  });
+  return id;
+}
+
+function generateWorkOrderTasks(workOrder: WorkOrderRow) {
+  const workOrderItems = getWorkOrderItems(workOrder.id);
+  if (!workOrderItems.length) throw businessError("生产工单未配置产品明细", 409);
+  const itemSteps = workOrderItems.map((item) => {
+    const steps = getRouteSteps(item.routeId);
+    if (!steps.length) throw businessError(`第 ${item.lineNo} 行工艺路线未配置工序步骤`, 409);
+    const startIndex = workOrder.startProcessId === null
+      ? 0
+      : steps.findIndex((step) => step.processId === workOrder.startProcessId);
+    if (startIndex < 0) {
+      throw businessError(`第 ${item.lineNo} 行工艺路线不包含工单起始工序`, 409);
+    }
+    return { item, steps: steps.slice(startIndex) };
+  });
+  const existingTaskCount = (
+    db.prepare("SELECT COUNT(*) AS count FROM production_tasks WHERE work_order_id = ?").get(workOrder.id) as { count: number }
+  ).count;
+  if (existingTaskCount > 0) throw businessError("该工单已生成工序任务", 409);
+
+  const insertTask = db.prepare(
+    `INSERT INTO production_tasks
+     (task_no, work_order_id, work_order_item_id, route_step_id, process_id, sequence_no, assigned_department_id,
+      output_target, quality_gate, output_item_id, output_warehouse_id, planned_quantity, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  itemSteps.forEach(({ item, steps }) => {
+    steps.forEach((step, index) => {
+      insertTask.run(
+        `${workOrder.workOrderNo}-P${String(item.lineNo).padStart(2, "0")}-${String(step.stepNo).padStart(2, "0")}`,
+        workOrder.id,
+        item.id,
+        step.id,
+        step.processId,
+        step.stepNo,
+        step.defaultDepartmentId ?? workOrder.departmentId,
+        step.outputTarget,
+        step.qualityGate,
+        step.outputItemId ?? (step.outputTarget === "finished_goods" ? item.productItemId : null),
+        step.outputWarehouseId,
+        index === 0 ? item.plannedQuantity : 0,
+        index === 0 ? "ready" : "pending"
+      );
+    });
+  });
+  db.prepare(
+    "UPDATE production_work_orders SET status = 'released', released_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+  ).run(workOrder.id);
+}
+
 export async function registerProductionRoutes(
   app: FastifyInstance,
   dependencies: { requirePermission: PermissionGuard; clientIp: ClientIp }
@@ -1559,20 +1743,32 @@ export async function registerProductionRoutes(
       .all()
   }));
 
-  app.get("/api/production/routes", { preHandler: requirePermission("production.routes.view") }, async () => ({
-    items: db
-      .prepare(
-        `SELECT r.id, r.code, r.name, r.product_item_id AS productItemId,
-                i.item_code AS productItemCode, i.name AS productItemName,
-                r.description, r.status, COUNT(s.id) AS stepCount
-         FROM production_routes r
-         LEFT JOIN items i ON i.id = r.product_item_id
-         LEFT JOIN production_route_steps s ON s.route_id = r.id
-         GROUP BY r.id
-         ORDER BY r.id DESC`
-      )
-      .all()
-  }));
+  app.get<{
+    Querystring: { processCode?: string };
+  }>("/api/production/routes", { preHandler: requirePermission("production.routes.view") }, async (request) => {
+    const processCode = request.query.processCode?.trim().toUpperCase();
+    if (processCode) assertProcessCodeAuthorization(request.user.id, processCode);
+    return {
+      items: db
+        .prepare(
+          `SELECT r.id, r.code, r.name, r.product_item_id AS productItemId,
+                  i.item_code AS productItemCode, i.name AS productItemName,
+                  r.description, r.status, COUNT(s.id) AS stepCount
+           FROM production_routes r
+           LEFT JOIN items i ON i.id = r.product_item_id
+           LEFT JOIN production_route_steps s ON s.route_id = r.id
+           WHERE (? = '' OR EXISTS (
+             SELECT 1
+             FROM production_route_steps filter_step
+             INNER JOIN production_processes filter_process ON filter_process.id = filter_step.process_id
+             WHERE filter_step.route_id = r.id AND filter_process.code = ?
+           ))
+           GROUP BY r.id
+           ORDER BY r.id DESC`
+        )
+        .all(processCode ?? "", processCode ?? "")
+    };
+  });
 
   app.get<{ Params: { id: string } }>("/api/production/routes/:id", { preHandler: requirePermission("production.routes.view") }, async (request) => {
     const id = parseId(request.params.id, "工艺路线");
@@ -1869,116 +2065,66 @@ export async function registerProductionRoutes(
     };
   });
 
-  app.post<{
-    Body: {
-      productItemId?: number;
-      routeId?: number;
-      items?: Array<{
-        productItemId?: number;
-        routeId?: number;
-        plannedQuantity?: number;
-        remark?: string;
-      }>;
-      departmentId?: number;
-      managerUserId?: number | null;
-      plannedQuantity?: number;
-      priority?: WorkOrderPriority;
-      plannedStartDate?: string;
-      plannedEndDate?: string;
-      remark?: string;
-    };
-  }>("/api/production/work-orders", { preHandler: requirePermission("production.workorders.manage") }, async (request) => {
-    const departmentId = parseId(request.body.departmentId, "生产部门");
-    getActiveDepartment(departmentId, "生产部门");
-    if (!canAccessDepartment(request.user.id, departmentId)) throw app.httpErrors.forbidden("当前账号没有该生产部门的数据范围");
-    const managerUserId = parseOptionalId(request.body.managerUserId, "工单负责人");
-    if (managerUserId) {
-      const manager = getActiveUser(managerUserId);
-      if (!manager || manager.status !== "active" || !canAccessDepartment(managerUserId, departmentId)) {
-        throw app.httpErrors.badRequest("工单负责人必须是该生产部门范围内的启用员工");
-      }
-    }
-    const sourceItems = request.body.items?.length
-      ? request.body.items
-      : [{
-          productItemId: request.body.productItemId,
-          routeId: request.body.routeId,
-          plannedQuantity: request.body.plannedQuantity,
-          remark: ""
-        }];
-    if (!sourceItems.length) throw app.httpErrors.badRequest("生产工单至少需要一行产品明细");
-    const seenItemRoutes = new Set<string>();
-    const normalizedItems = sourceItems.map((line, index) => {
-      const productItemId = parseId(line.productItemId, `第 ${index + 1} 行生产商品`);
-      const routeId = parseId(line.routeId, `第 ${index + 1} 行工艺路线`);
-      const plannedQuantity = parseQuantity(line.plannedQuantity, `第 ${index + 1} 行计划数量`);
-      const item = getItem(productItemId);
-      const route = getRoute(routeId);
-      if (!item || item.status !== "active") throw app.httpErrors.badRequest(`第 ${index + 1} 行生产商品不存在或已停用`);
-      if (!route || route.status !== "active") throw app.httpErrors.badRequest(`第 ${index + 1} 行工艺路线不存在或已停用`);
-      if (route.productItemId !== null && route.productItemId !== productItemId) {
-        throw app.httpErrors.badRequest(`第 ${index + 1} 行工艺路线不适用于当前生产商品`);
-      }
-      if (!getRouteSteps(routeId).length) throw app.httpErrors.badRequest(`第 ${index + 1} 行工艺路线未配置工序步骤`);
-      const itemRouteKey = `${productItemId}:${routeId}`;
-      if (seenItemRoutes.has(itemRouteKey)) throw app.httpErrors.badRequest(`第 ${index + 1} 行生产商品和工艺路线重复`);
-      seenItemRoutes.add(itemRouteKey);
-      return {
-        productItemId,
-        productItemCode: item.itemCode,
-        routeId,
-        plannedQuantity,
-        remark: line.remark?.trim() ?? ""
-      };
-    });
-    const firstItem = normalizedItems[0];
-    try {
-      const create = db.transaction(() => {
-        const result = db
-          .prepare(
-            `INSERT INTO production_work_orders
-             (work_order_no, product_item_id, route_id, department_id, manager_user_id,
-              planned_quantity, priority, planned_start_date, planned_end_date, remark, created_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          )
-          .run(
-            nextDailyCode("MO", "production_work_orders", "work_order_no"),
-            firstItem.productItemId,
-            firstItem.routeId,
-            departmentId,
-            managerUserId,
-            firstItem.plannedQuantity,
-            request.body.priority ?? "normal",
-            request.body.plannedStartDate ?? "",
-            request.body.plannedEndDate ?? "",
-            request.body.remark?.trim() ?? "",
-            request.user.id
-          );
-        const id = Number(result.lastInsertRowid);
-        const insertItem = db.prepare(
-          `INSERT INTO production_work_order_items
-           (work_order_id, line_no, product_item_id, route_id, planned_quantity, remark)
-           VALUES (?, ?, ?, ?, ?, ?)`
+  app.post<{ Body: WorkOrderCreateInput }>(
+    "/api/production/work-orders",
+    { preHandler: requirePermission("production.workorders.manage") },
+    async (request) => {
+      try {
+        const header = validateWorkOrderHeader(request.user.id, request.body);
+        const normalizedItems = normalizeWorkOrderItems(request.body);
+        const id = db.transaction(() => insertWorkOrderRecord(request.body, header, normalizedItems, request.user.id))();
+        recordAudit(
+          request.user.id,
+          "CREATE",
+          "production_work_order",
+          id,
+          `创建生产工单，产品明细 ${normalizedItems.map((item) => item.productItemCode).join("、")}`,
+          clientIp(request)
         );
-        normalizedItems.forEach((line, index) => {
-          insertItem.run(id, index + 1, line.productItemId, line.routeId, line.plannedQuantity, line.remark);
-        });
-        return id;
-      });
-      const id = create();
-      recordAudit(
-        request.user.id,
-        "CREATE",
-        "production_work_order",
-        id,
-        `创建生产工单，产品明细 ${normalizedItems.map((item) => item.productItemCode).join("、")}`,
-        clientIp(request)
-      );
-      return { item: getWorkOrder(id) };
-    } catch (error) {
-      throw app.httpErrors.conflict(error instanceof Error ? error.message : "生产工单创建失败");
+        return { item: getWorkOrder(id) };
+      } catch (error) {
+        throw app.httpErrors.conflict(error instanceof Error ? error.message : "生产工单创建失败");
+      }
     }
-  });
+  );
+
+  app.post<{ Params: { processCode: string }; Body: WorkOrderCreateInput }>(
+    "/api/production/processes/:processCode/work-orders",
+    { preHandler: requirePermission("production.workorders.manage") },
+    async (request) => {
+      const processCode = request.params.processCode.trim().toUpperCase();
+      const startProcess = assertProcessCodeAuthorization(request.user.id, processCode);
+      try {
+        const header = validateWorkOrderHeader(request.user.id, request.body);
+        const normalizedItems = normalizeWorkOrderItems(request.body, startProcess);
+        const id = db.transaction(() => {
+          const createdWorkOrderId = insertWorkOrderRecord(
+            request.body,
+            header,
+            normalizedItems,
+            request.user.id,
+            startProcess.id
+          );
+          const workOrder = getWorkOrder(createdWorkOrderId);
+          if (!workOrder) throw businessError("生产工单创建后读取失败", 500);
+          generateWorkOrderTasks(workOrder);
+          return createdWorkOrderId;
+        })();
+        const workOrder = getWorkOrder(id);
+        recordAudit(
+          request.user.id,
+          "CREATE_AND_RELEASE",
+          "production_work_order",
+          id,
+          `从${startProcess.name}发起并下达生产工单，产品明细 ${normalizedItems.map((item) => item.productItemCode).join("、")}`,
+          clientIp(request)
+        );
+        return { item: workOrder };
+      } catch (error) {
+        throw app.httpErrors.conflict(error instanceof Error ? error.message : "当前工序生产工单创建失败");
+      }
+    }
+  );
 
   app.post<{ Params: { id: string } }>("/api/production/work-orders/:id/release", { preHandler: requirePermission("production.workorders.manage") }, async (request) => {
     const id = parseId(request.params.id, "生产工单");
@@ -1986,46 +2132,7 @@ export async function registerProductionRoutes(
     if (!workOrder) throw app.httpErrors.notFound("生产工单不存在");
     if (!canAccessDepartment(request.user.id, workOrder.departmentId)) throw app.httpErrors.forbidden("当前账号没有该生产工单的数据范围");
     if (workOrder.status !== "draft") throw app.httpErrors.conflict("只有草稿工单可以下达");
-    const workOrderItems = getWorkOrderItems(id);
-    if (!workOrderItems.length) throw app.httpErrors.conflict("生产工单未配置产品明细");
-    const itemSteps = workOrderItems.map((item) => {
-      const steps = getRouteSteps(item.routeId);
-      if (!steps.length) throw app.httpErrors.conflict(`第 ${item.lineNo} 行工艺路线未配置工序步骤`);
-      return { item, steps };
-    });
-    const existingTaskCount = (db.prepare("SELECT COUNT(*) AS count FROM production_tasks WHERE work_order_id = ?").get(id) as { count: number }).count;
-    if (existingTaskCount > 0) throw app.httpErrors.conflict("该工单已生成工序任务");
-    const release = db.transaction(() => {
-      const insertTask = db.prepare(
-        `INSERT INTO production_tasks
-         (task_no, work_order_id, work_order_item_id, route_step_id, process_id, sequence_no, assigned_department_id,
-          output_target, quality_gate, output_item_id, output_warehouse_id, planned_quantity, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      );
-      itemSteps.forEach(({ item, steps }) => {
-        steps.forEach((step, index) => {
-          insertTask.run(
-            `${workOrder.workOrderNo}-P${String(item.lineNo).padStart(2, "0")}-${String(step.stepNo).padStart(2, "0")}`,
-            id,
-            item.id,
-            step.id,
-            step.processId,
-            step.stepNo,
-            step.defaultDepartmentId ?? workOrder.departmentId,
-            step.outputTarget,
-            step.qualityGate,
-            step.outputItemId ?? (step.outputTarget === "finished_goods" ? item.productItemId : null),
-            step.outputWarehouseId,
-            index === 0 ? item.plannedQuantity : 0,
-            index === 0 ? "ready" : "pending"
-          );
-        });
-      });
-      db.prepare(
-        "UPDATE production_work_orders SET status = 'released', released_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-      ).run(id);
-    });
-    release();
+    db.transaction(() => generateWorkOrderTasks(workOrder))();
     recordAudit(request.user.id, "RELEASE", "production_work_order", id, `下达生产工单 ${workOrder.workOrderNo}`, clientIp(request));
     return { item: getWorkOrder(id) };
   });
