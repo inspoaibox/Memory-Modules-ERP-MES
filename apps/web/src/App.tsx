@@ -127,8 +127,8 @@ type NavItem = {
 const pageLabels: Record<Page, string> = {
   dashboard: "工作台",
   users: "系统设置 / 员工账号",
-  roles: "系统设置 / 角色权限",
-  departments: "系统设置 / 组织部门",
+  roles: "系统设置 / 工序角色权限",
+  departments: "系统设置 / 工序流程",
   audit: "系统设置 / 操作审计",
   "production-overview": "生产管理 / 工作台",
   "production-bga": "生产管理 / 芯片拆卸植球",
@@ -181,8 +181,8 @@ const normalizeStoredPage = (stored: string | null): Page => {
 const navItems: NavItem[] = [
   { key: "dashboard", label: "工作台", icon: LayoutDashboard, permission: "system.dashboard.view", group: "总览" },
   { key: "users", label: "员工账号", icon: Users, permission: "system.users.view", group: "系统管理", section: "system" },
-  { key: "roles", label: "角色权限", icon: ShieldCheck, permission: "system.roles.view", group: "系统管理", section: "system" },
-  { key: "departments", label: "组织部门", icon: Building2, permission: "system.departments.view", group: "系统管理", section: "system" },
+  { key: "roles", label: "工序角色权限", icon: ShieldCheck, permission: "system.roles.view", group: "系统管理", section: "system" },
+  { key: "departments", label: "工序流程", icon: Building2, permission: "system.departments.view", group: "系统管理", section: "system" },
   { key: "audit", label: "操作审计", icon: FileClock, permission: "system.audit.view", group: "系统管理", section: "system" },
   { key: "production-overview", label: "生产工作台", icon: Factory, permission: "production.dashboard.view", group: "业务模块", section: "production" },
   { key: "production-workorders", label: "生产计划与工单", icon: PackageCheck, permission: "production.workorders.view", group: "业务模块", section: "production" },
@@ -312,7 +312,7 @@ function App() {
       {page === "dashboard" && <DashboardPage />}
       {page === "users" && <UsersPage currentUser={user} />}
       {page === "roles" && <RolesPage currentUser={user} />}
-      {page === "departments" && <DepartmentsPage currentUser={user} />}
+      {page === "departments" && <ProductionProcessesPage currentUser={user} />}
       {page === "audit" && <AuditPage />}
       {page === "product-items" && <ProductItemsPage currentUser={user} />}
       {page === "product-categories" && <ProductCategoriesPage currentUser={user} />}
@@ -559,7 +559,7 @@ function DashboardPage() {
 
   return (
     <div>
-      <PageHeader eyebrow="系统总览" title="管理工作台" description="从基础组织和权限开始，逐步搭建内存条 ERP + MES 的业务底座。" action={<button className="secondary-button" onClick={load}><RefreshCw size={16} />刷新数据</button>} />
+      <PageHeader eyebrow="系统总览" title="管理工作台" description="从基础工序和权限开始，逐步搭建内存条 ERP + MES 的业务底座。" action={<button className="secondary-button" onClick={load}><RefreshCw size={16} />刷新数据</button>} />
       {error && <div className="form-error page-error">{error}</div>}
       <div className="metric-grid">
         {(data?.cards ?? []).map((card) => (
@@ -577,8 +577,8 @@ function DashboardPage() {
         </section>
         <section className="panel quick-panel">
           <div className="panel-heading"><div><span className="eyebrow">系统底座</span><h2>下一步工作</h2></div><SlidersHorizontal size={19} className="muted-icon" /></div>
-          <div className="quick-item"><div className="quick-icon blue"><UserCog size={18} /></div><div><strong>完善员工账号</strong><p>补充工号、岗位、部门和角色</p></div><ArrowRight size={17} /></div>
-          <div className="quick-item"><div className="quick-icon green"><ShieldCheck size={18} /></div><div><strong>配置岗位权限</strong><p>按岗位模板分配可操作功能</p></div><ArrowRight size={17} /></div>
+          <div className="quick-item"><div className="quick-icon blue"><UserCog size={18} /></div><div><strong>完善员工账号</strong><p>补充工号、岗位、工序流程和角色</p></div><ArrowRight size={17} /></div>
+          <div className="quick-item"><div className="quick-icon green"><ShieldCheck size={18} /></div><div><strong>配置工序权限</strong><p>按工序模板分配可操作功能</p></div><ArrowRight size={17} /></div>
           <div className="quick-item"><div className="quick-icon amber"><Factory size={18} /></div><div><strong>准备生产模块</strong><p>下一阶段接入工单和工序任务</p></div><ArrowRight size={17} /></div>
         </section>
       </div>
@@ -609,11 +609,11 @@ function UsersPage({ currentUser }: { currentUser: User }) {
   const filtered = users.filter((item) => `${item.displayName}${item.username}${item.employeeNo}${item.position}`.toLowerCase().includes(query.toLowerCase()));
   return (
     <div>
-      <PageHeader eyebrow="系统管理 / 账号" title="员工账号" description="每位员工使用独立账号，岗位角色和数据范围决定可操作的系统功能。" action={canManageUsers ? <button className="primary-button" onClick={() => { setEditing(null); setShowForm(true); }}><Plus size={17} />新建员工</button> : undefined} />
+      <PageHeader eyebrow="系统管理 / 账号" title="员工账号" description="每位员工使用独立账号，工序角色和数据范围决定可操作的系统功能。" action={canManageUsers ? <button className="primary-button" onClick={() => { setEditing(null); setShowForm(true); }}><Plus size={17} />新建员工</button> : undefined} />
       <section className="panel">
         <div className="toolbar"><div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索姓名、账号、工号或岗位" /></div><button className="icon-button" onClick={() => load()} title="刷新列表" aria-label="刷新列表"><RefreshCw size={17} /></button></div>
-        <div className="table-wrap"><table><thead><tr><th>员工</th><th>工号</th><th>部门 / 岗位</th><th>角色</th><th>状态</th><th>最近登录</th><th className="action-cell">操作</th></tr></thead><tbody>
-          {filtered.map((item) => <tr key={item.id}><td><div className="person-cell"><span className="avatar small">{item.displayName.slice(0, 1)}</span><div><strong>{item.displayName}</strong><small>@{item.username}</small></div></div></td><td className="muted-cell">{item.employeeNo}</td><td><strong>{item.departmentName || "未分配部门"}</strong><small>{item.position || "未设置岗位"}</small></td><td><div className="tag-list">{(item.roleNames || "未分配角色").split("、").map((role) => <span className="tag" key={role}>{role}</span>)}</div></td><td><span className={`status-badge ${item.status}`}>{item.status === "active" ? "启用" : "停用"}</span></td><td className="muted-cell">{item.lastLoginAt ? formatDate(item.lastLoginAt) : "尚未登录"}</td><td className="action-cell">{canManageUsers ? <button className="table-action" onClick={() => { setEditing(item); setShowForm(true); }}>编辑</button> : <span className="muted-cell">仅查看</span>}</td></tr>)}
+        <div className="table-wrap"><table><thead><tr><th>员工</th><th>工号</th><th>工序流程 / 岗位</th><th>角色</th><th>状态</th><th>最近登录</th><th className="action-cell">操作</th></tr></thead><tbody>
+          {filtered.map((item) => <tr key={item.id}><td><div className="person-cell"><span className="avatar small">{item.displayName.slice(0, 1)}</span><div><strong>{item.displayName}</strong><small>@{item.username}</small></div></div></td><td className="muted-cell">{item.employeeNo}</td><td><strong>{item.departmentName || "未分配工序流程"}</strong><small>{item.position || "未设置岗位"}</small></td><td><div className="tag-list">{(item.roleNames || "未分配角色").split("、").map((role) => <span className="tag" key={role}>{role}</span>)}</div></td><td><span className={`status-badge ${item.status}`}>{item.status === "active" ? "启用" : "停用"}</span></td><td className="muted-cell">{item.lastLoginAt ? formatDate(item.lastLoginAt) : "尚未登录"}</td><td className="action-cell">{canManageUsers ? <button className="table-action" onClick={() => { setEditing(item); setShowForm(true); }}>编辑</button> : <span className="muted-cell">仅查看</span>}</td></tr>)}
           {!filtered.length && <tr><td colSpan={7}><EmptyState title="没有找到员工" description="调整搜索条件，或创建一个新的员工账号。" /></td></tr>}
         </tbody></table></div>
       </section>
@@ -647,9 +647,9 @@ function UserForm({ user, departments, roles, currentUser, onClose, onSaved }: {
     }
   };
   return <Modal title={user ? "编辑员工账号" : "新建员工账号"} onClose={onClose}><form className="modal-form" onSubmit={submit}>
-    <div className="form-grid"><label>登录账号<input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} disabled={Boolean(user)} /></label><label>员工姓名<input value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} /></label><label>工号<input value={form.employeeNo} onChange={(event) => setForm({ ...form, employeeNo: event.target.value })} /></label><label>岗位<input value={form.position} onChange={(event) => setForm({ ...form, position: event.target.value })} placeholder="例如：芯片测试员" /></label><label>所属部门<select value={form.departmentId} onChange={(event) => setForm({ ...form, departmentId: event.target.value })}><option value="">未分配部门</option>{departments.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label>账号状态<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value as "active" | "inactive" })}><option value="active">启用</option><option value="inactive">停用</option></select></label><label className="full-span">{user ? "重置密码（留空则不修改）" : "初始密码"}<input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label></div>
-    <div className="role-picker"><div className="field-label">岗位角色</div><div className="role-options">{roles.map((role) => <button type="button" className={`role-option ${form.roleIds.includes(role.id.toString()) ? "selected" : ""}`} key={role.id} onClick={() => toggleRole(role.id.toString())}><span>{form.roleIds.includes(role.id.toString()) ? <Check size={14} /> : <span className="empty-check" />}</span>{role.name}</button>)}</div></div>
-    {isSystemAdmin && <div className="role-picker"><div className="field-label">经理管理部门</div><div className="role-options">{departments.filter((department) => department.status === "active").map((department) => <button type="button" className={`role-option ${form.managedDepartmentIds.includes(department.id.toString()) ? "selected" : ""}`} key={department.id} onClick={() => toggleManagedDepartment(department.id.toString())}><span>{form.managedDepartmentIds.includes(department.id.toString()) ? <Check size={14} /> : <span className="empty-check" />}</span>{department.name}</button>)}</div></div>}
+    <div className="form-grid"><label>登录账号<input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} disabled={Boolean(user)} /></label><label>员工姓名<input value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} /></label><label>工号<input value={form.employeeNo} onChange={(event) => setForm({ ...form, employeeNo: event.target.value })} /></label><label>岗位<input value={form.position} onChange={(event) => setForm({ ...form, position: event.target.value })} placeholder="例如：工序员工" /></label><label>所属工序流程<select value={form.departmentId} onChange={(event) => setForm({ ...form, departmentId: event.target.value })}><option value="">未分配工序流程</option>{departments.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label>账号状态<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value as "active" | "inactive" })}><option value="active">启用</option><option value="inactive">停用</option></select></label><label className="full-span">{user ? "重置密码（留空则不修改）" : "初始密码"}<input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label></div>
+    <div className="role-picker"><div className="field-label">工序角色</div><div className="role-options">{roles.map((role) => <button type="button" className={`role-option ${form.roleIds.includes(role.id.toString()) ? "selected" : ""}`} key={role.id} onClick={() => toggleRole(role.id.toString())}><span>{form.roleIds.includes(role.id.toString()) ? <Check size={14} /> : <span className="empty-check" />}</span>{role.name}</button>)}</div></div>
+    {isSystemAdmin && <div className="role-picker"><div className="field-label">主管工序范围</div><div className="role-options">{departments.filter((department) => department.status === "active").map((department) => <button type="button" className={`role-option ${form.managedDepartmentIds.includes(department.id.toString()) ? "selected" : ""}`} key={department.id} onClick={() => toggleManagedDepartment(department.id.toString())}><span>{form.managedDepartmentIds.includes(department.id.toString()) ? <Check size={14} /> : <span className="empty-check" />}</span>{department.name}</button>)}</div></div>}
     {currentUser.id === user?.id && <div className="form-note">当前正在编辑自己的账号，停用后将立即退出系统。</div>}
     {error && <div className="form-error">{error}</div>}
     <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving}>{saving ? "保存中..." : "保存账号"} <Check size={16} /></button></div>
@@ -664,7 +664,6 @@ function RolesPage({ currentUser }: { currentUser: User }) {
   const [roleDetail, setRoleDetail] = useState<Role | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [showRoleForm, setShowRoleForm] = useState(false);
   const load = async () => {
     const [roleResult, permissionResult] = await Promise.all([request<{ items: Role[] }>("/roles"), request<{ items: Permission[] }>("/permissions")]);
     setRoles(roleResult.items);
@@ -718,53 +717,15 @@ function RolesPage({ currentUser }: { currentUser: User }) {
       setSaving(false);
     }
   };
-  return <div><PageHeader eyebrow="系统管理 / 权限" title="角色权限" description="角色是岗位权限模板，员工通过绑定角色获得可操作的菜单和业务动作。" action={<div className="header-actions">{canManageRoles && <button className="primary-button" onClick={() => setShowRoleForm(true)}><Plus size={16} />新建角色</button>}<button className="secondary-button" onClick={() => load()}><RefreshCw size={16} />刷新角色</button></div>} />
-    <div className="roles-layout"><section className="panel roles-list"><div className="panel-heading"><div><span className="eyebrow">角色模板</span><h2>岗位角色</h2></div><span className="count-label">{roles.length} 个</span></div>{roles.map((role) => <button className={`role-list-item ${selectedId === role.id ? "selected" : ""}`} key={role.id} onClick={() => setSelectedId(role.id)}><span className="role-symbol"><ShieldCheck size={17} /></span><span><strong>{role.name}</strong><small>{role.code} · {role.userCount} 名员工</small></span><ArrowRight size={16} /></button>)}</section>
+  return <div><PageHeader eyebrow="系统管理 / 权限" title="工序角色权限" description="工序角色由工序流程自动生成，每道工序默认拥有主管和员工两类角色。" action={<div className="header-actions"><button className="secondary-button" onClick={() => load()}><RefreshCw size={16} />刷新角色</button></div>} />
+    <div className="roles-layout"><section className="panel roles-list"><div className="panel-heading"><div><span className="eyebrow">按工序生成</span><h2>工序角色</h2></div><span className="count-label">{roles.length} 个</span></div>{roles.map((role) => <button className={`role-list-item ${selectedId === role.id ? "selected" : ""}`} key={role.id} onClick={() => setSelectedId(role.id)}><span className="role-symbol"><ShieldCheck size={17} /></span><span><strong>{role.name}</strong><small>{role.processName ? `${role.processName} · ${role.roleKind === "manager" ? "主管" : "员工"}` : role.code} · {role.userCount} 名员工</small></span><ArrowRight size={16} /></button>)}</section>
        <section className="panel permission-panel"><div className="panel-heading"><div><span className="eyebrow">权限配置</span><h2>{roleDetail?.name ?? "选择角色"}</h2><p>{roleDetail?.description}</p></div>{selectedId && canManageRoles && <button className="primary-button" onClick={save} disabled={saving}>{saving ? "保存中..." : "保存权限"} <Check size={16} /></button>}</div>{error && <div className="form-error">{error}</div>}{Object.entries(permissionGroups).map(([module, modulePermissions]) => <div className="permission-group" key={module}><div className="permission-group-title"><span>{module}</span><small>{modulePermissions.length} 项权限</small></div>{modulePermissions.map((permission) => <label className="permission-row" key={permission.id}><input type="checkbox" disabled={!canManageRoles} checked={enabled.includes(permission.id)} onChange={() => togglePermission(permission.id)} /><span className="fake-checkbox">{enabled.includes(permission.id) && <Check size={13} />}</span><span><strong>{permission.label}</strong><small>{permission.action} · {permission.code}</small></span></label>)}</div>)}</section>
     </div>
-    {showRoleForm && <RoleForm onClose={() => setShowRoleForm(false)} onSaved={async () => { setShowRoleForm(false); await load(); }} />}
   </div>;
 }
 
-function RoleForm({ onClose, onSaved }: { onClose: () => void; onSaved: () => Promise<void> }) {
-  const [form, setForm] = useState({ name: "", code: "", description: "" });
-  const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setError("");
-    setSaving(true);
-    try {
-      await request("/roles", { method: "POST", body: JSON.stringify(form) });
-      await onSaved();
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "保存失败");
-    } finally {
-      setSaving(false);
-    }
-  };
-  return <Modal title="新建岗位角色" onClose={onClose}><form className="modal-form" onSubmit={submit}><div className="form-grid"><label>角色名称<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：生产班组长" /></label><label>角色编码<input value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value })} placeholder="例如：LINE_LEADER" /></label><label className="full-span">角色描述<textarea rows={4} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label></div>{error && <div className="form-error">{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving}>{saving ? "创建中..." : "创建角色"} <Check size={16} /></button></div></form></Modal>;
-}
-
 function DepartmentsPage({ currentUser }: { currentUser: User }) {
-  const [items, setItems] = useState<Department[]>([]);
-  const [form, setForm] = useState({ name: "", code: "", description: "" });
-  const [error, setError] = useState("");
-  const canManageDepartments = hasPermission(currentUser, "system.departments.manage");
-  const load = () => request<{ items: Department[] }>("/departments").then((result) => setItems(result.items)).catch(() => undefined);
-  useEffect(() => { void load(); }, []);
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setError("");
-    try {
-      await request("/departments", { method: "POST", body: JSON.stringify(form) });
-      setForm({ name: "", code: "", description: "" });
-      load();
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "保存失败");
-    }
-  };
-  return <div><PageHeader eyebrow="组织管理" title="组织部门" description="部门是员工数据范围和后续工序权限的组织基础。" /><div className="split-layout"><section className="panel"><div className="panel-heading"><div><span className="eyebrow">当前组织</span><h2>部门列表</h2></div><span className="count-label">{items.length} 个</span></div><div className="department-list">{items.map((item) => <div className="department-item" key={item.id}><div className="department-icon"><Building2 size={18} /></div><div><strong>{item.name}</strong><small>{item.code} · {item.description || "暂无描述"}</small></div><span>{item.userCount} 人</span></div>)}</div></section>{canManageDepartments ? <section className="panel"><div className="panel-heading"><div><span className="eyebrow">新增组织</span><h2>创建部门</h2></div><Plus size={19} className="muted-icon" /></div><form className="stack-form" onSubmit={submit}><label>部门名称<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：生产部" /></label><label>部门编码<input value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value })} placeholder="例如：PRODUCTION" /></label><label>部门描述<textarea rows={4} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>{error && <div className="form-error">{error}</div>}<button className="primary-button"><Plus size={16} />创建部门</button></form></section> : <section className="panel reserved-panel"><span className="eyebrow">访问范围</span><h2>当前账号仅可查看</h2><p>如需新增或编辑部门，请联系系统管理员申请组织管理权限。</p></section>}</div></div>;
+  return <ProductionProcessesPage currentUser={currentUser} />;
 }
 
 function AuditPage() {

@@ -2,10 +2,11 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   canAccessDepartment,
   db,
-  getUserDepartmentIds,
+  getProcessRoleCode,
   hasPermission,
   isSystemAdmin,
   recordAudit,
+  syncProcessRoleTemplates,
   type WarehouseType,
   warehouseTypeLabels
 } from "./db.js";
@@ -41,6 +42,11 @@ type ProcessRow = {
   name: string;
   processType: ProcessType;
   status: "active" | "inactive";
+};
+
+type ProductionScopeWhere = {
+  clause: string;
+  params: Array<number | string>;
 };
 
 type ItemRow = {
@@ -420,6 +426,11 @@ function getProcess(id: number) {
 }
 
 function getProcessAuthorization(processId: number) {
+  const supervisorIds = (
+    db
+      .prepare("SELECT user_id AS id FROM production_process_supervisors WHERE process_id = ? ORDER BY user_id")
+      .all(processId) as Array<{ id: number }>
+  ).map((row) => row.id);
   const roleIds = (
     db
       .prepare("SELECT role_id AS id FROM production_process_role_authorizations WHERE process_id = ? ORDER BY role_id")
@@ -430,7 +441,7 @@ function getProcessAuthorization(processId: number) {
       .prepare("SELECT user_id AS id FROM production_process_user_authorizations WHERE process_id = ? ORDER BY user_id")
       .all(processId) as Array<{ id: number }>
   ).map((row) => row.id);
-  return { roleIds, userIds };
+  return { supervisorIds, roleIds, userIds };
 }
 
 function isUserAuthorizedForProcess(userId: number, processId: number) {
@@ -443,6 +454,10 @@ function isUserAuthorizedForProcess(userId: number, processId: number) {
          WHERE process_id = ? AND user_id = ?
        )
        OR EXISTS (
+         SELECT 1 FROM production_process_supervisors
+         WHERE process_id = ? AND user_id = ?
+       )
+       OR EXISTS (
          SELECT 1
          FROM production_process_role_authorizations pra
          INNER JOIN user_roles ur ON ur.role_id = pra.role_id
@@ -450,8 +465,17 @@ function isUserAuthorizedForProcess(userId: number, processId: number) {
          WHERE pra.process_id = ? AND ur.user_id = ? AND r.status = 'active'
        )`
     )
-    .get(processId, userId, processId, userId);
+    .get(processId, userId, processId, userId, processId, userId);
   return Boolean(authorized);
+}
+
+function isUserSupervisorForProcess(userId: number, processId: number) {
+  if (isSystemAdmin(userId)) return true;
+  return Boolean(
+    db
+      .prepare("SELECT 1 FROM production_process_supervisors WHERE process_id = ? AND user_id = ?")
+      .get(processId, userId)
+  );
 }
 
 function assertRepairProcessAuthorization(userId: number) {
@@ -471,11 +495,8 @@ function assertRepairOwnerEligibility(userId: number, task: TaskRow) {
     throw businessError("维修负责人没有不良维修处理权限");
   }
   assertRepairProcessAuthorization(userId);
-  if (
-    !canAccessDepartment(userId, task.workOrderDepartmentId) &&
-    (task.assignedDepartmentId === null || !canAccessDepartment(userId, task.assignedDepartmentId))
-  ) {
-    throw businessError("维修负责人必须属于来源工单或工序执行部门范围");
+  if (!isUserAuthorizedForProcess(userId, task.processId)) {
+    throw businessError("维修负责人必须拥有来源工序授权", 403);
   }
   return owner;
 }
@@ -500,14 +521,6 @@ function isUserAuthorizedForRepairProcess(userId: number) {
     .prepare("SELECT id FROM production_processes WHERE code = 'PROC-REPAIR' AND status = 'active'")
     .get() as { id: number } | undefined;
   return Boolean(repairProcess && isUserAuthorizedForProcess(userId, repairProcess.id));
-}
-
-function hasDepartmentManagementAuthority(userId: number) {
-  return (
-    isSystemAdmin(userId) ||
-    hasPermission(userId, "production.workorders.manage") ||
-    hasPermission(userId, "production.tasks.manage")
-  );
 }
 
 function getRoute(id: number) {
@@ -606,7 +619,36 @@ function getWorkOrderItems(workOrderId: number) {
 }
 
 function assertWorkOrderAccess(userId: number, workOrder: WorkOrderRow) {
-  if (!canAccessDepartment(userId, workOrder.departmentId)) {
+  if (isSystemAdmin(userId)) return;
+  if (workOrder.createdBy === userId || workOrder.managerUserId === userId) return;
+  const hasTaskScope = db
+    .prepare(
+      `SELECT 1
+       FROM production_tasks
+       WHERE work_order_id = ?
+         AND process_id IN (
+           SELECT p.id
+           FROM production_processes p
+           WHERE EXISTS (
+             SELECT 1 FROM production_process_supervisors pps
+             WHERE pps.process_id = p.id AND pps.user_id = ?
+           )
+           OR EXISTS (
+             SELECT 1 FROM production_process_user_authorizations pua
+             WHERE pua.process_id = p.id AND pua.user_id = ?
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM production_process_role_authorizations pra
+             INNER JOIN user_roles ur ON ur.role_id = pra.role_id
+             INNER JOIN roles r ON r.id = ur.role_id
+             WHERE pra.process_id = p.id AND ur.user_id = ? AND r.status = 'active'
+           )
+         )
+       LIMIT 1`
+    )
+    .get(workOrder.id, userId, userId, userId);
+  if (!hasTaskScope) {
     throw businessError("当前账号没有该生产工单的数据范围", 403);
   }
 }
@@ -661,11 +703,7 @@ function getTask(id: number) {
 
 function canViewTask(userId: number, task: TaskRow) {
   if (isSystemAdmin(userId) || task.assignedUserId === userId) return true;
-  if (!hasDepartmentManagementAuthority(userId)) return false;
-  return (
-    canAccessDepartment(userId, task.workOrderDepartmentId) ||
-    (task.assignedDepartmentId !== null && canAccessDepartment(userId, task.assignedDepartmentId))
-  );
+  return isUserAuthorizedForProcess(userId, task.processId);
 }
 
 function assertTaskViewAccess(userId: number, taskId: number) {
@@ -678,13 +716,11 @@ function assertTaskViewAccess(userId: number, taskId: number) {
 function assertTaskManageAccess(userId: number, taskId: number) {
   const task = getTask(taskId);
   if (!task) throw businessError("工序任务不存在", 404);
-  const canManageWorkOrderDepartment = canAccessDepartment(userId, task.workOrderDepartmentId);
-  const canManageAssignedDepartment = task.assignedDepartmentId !== null && canAccessDepartment(userId, task.assignedDepartmentId);
-  if (!isSystemAdmin(userId) && !hasDepartmentManagementAuthority(userId)) {
+  if (!isSystemAdmin(userId) && !hasPermission(userId, "production.tasks.manage")) {
     throw businessError("当前账号没有工序任务派工权限", 403);
   }
-  if (!isSystemAdmin(userId) && !canManageWorkOrderDepartment && !canManageAssignedDepartment) {
-    throw businessError("当前账号没有该工单的派工管理范围", 403);
+  if (!isSystemAdmin(userId) && !isUserSupervisorForProcess(userId, task.processId)) {
+    throw businessError("当前账号不是该工序主管，不能派工", 403);
   }
   assertWorkOrderExecutionAvailable(task.executionStatus);
   return task;
@@ -694,13 +730,10 @@ function assertTaskExecutionAccess(userId: number, taskId: number) {
   const task = assertTaskViewAccess(userId, taskId);
   assertWorkOrderExecutionAvailable(task.executionStatus);
   if (isSystemAdmin(userId)) return task;
-  if (!task.assignedDepartmentId || !task.assignedUserId) {
-    throw businessError("任务尚未派工到执行部门和员工", 409);
+  if (!task.assignedUserId) {
+    throw businessError("任务尚未派工到执行员工", 409);
   }
   if (task.assignedUserId !== userId) throw businessError("该任务已派给其他员工执行", 403);
-  if (!canAccessDepartment(userId, task.assignedDepartmentId)) {
-    throw businessError("当前账号不属于该任务执行部门", 403);
-  }
   if (!hasPermission(userId, "production.operations.execute") || !isUserAuthorizedForProcess(userId, task.processId)) {
     throw businessError("当前账号没有该工序的执行授权", 403);
   }
@@ -711,18 +744,14 @@ function canManageRepair(userId: number, task: TaskRow, ownerUserId: number | nu
   return (
     isSystemAdmin(userId) ||
     ownerUserId === userId ||
-    (hasDepartmentManagementAuthority(userId) &&
-      (canAccessDepartment(userId, task.workOrderDepartmentId) ||
-        (task.assignedDepartmentId !== null && canAccessDepartment(userId, task.assignedDepartmentId))))
+    (hasPermission(userId, "production.repairs.manage") && isUserAuthorizedForProcess(userId, task.processId))
   );
 }
 
-function canManageTaskDepartment(userId: number, task: TaskRow) {
+function canManageTaskProcess(userId: number, task: TaskRow) {
   return (
     isSystemAdmin(userId) ||
-    (hasDepartmentManagementAuthority(userId) &&
-      (canAccessDepartment(userId, task.workOrderDepartmentId) ||
-        (task.assignedDepartmentId !== null && canAccessDepartment(userId, task.assignedDepartmentId))))
+    (hasPermission(userId, "production.repairs.manage") && isUserSupervisorForProcess(userId, task.processId))
   );
 }
 
@@ -733,31 +762,32 @@ function assertRepairManageAccess(userId: number, task: TaskRow, ownerUserId: nu
 }
 
 function assertRepairAssignmentAccess(userId: number, task: TaskRow) {
-  if (!canManageTaskDepartment(userId, task)) {
+  if (!canManageTaskProcess(userId, task)) {
     throw businessError("当前账号没有该维修单的派修管理范围", 403);
   }
 }
 
 function taskScopeWhere(userId: number, workOrderAlias = "wo", taskAlias = "t") {
-  if (isSystemAdmin(userId)) return { clause: "1 = 1", params: [] as number[] };
-  if (!hasDepartmentManagementAuthority(userId)) {
-    return { clause: `${taskAlias}.assigned_user_id = ?`, params: [userId] };
-  }
-  return departmentTaskScopeWhere(userId, workOrderAlias, taskAlias);
-}
-
-function departmentTaskScopeWhere(userId: number, workOrderAlias = "wo", taskAlias = "t") {
-  if (isSystemAdmin(userId)) return { clause: "1 = 1", params: [] as number[] };
-  const departmentIds = getUserDepartmentIds(userId);
-  if (!departmentIds.length) {
-    return { clause: `${taskAlias}.assigned_user_id = ?`, params: [userId] };
-  }
-  const placeholders = departmentIds.map(() => "?").join(",");
+  if (isSystemAdmin(userId)) return { clause: "1 = 1", params: [] as Array<number | string> };
   return {
-    clause: `(${workOrderAlias}.department_id IN (${placeholders})
-      OR COALESCE(${taskAlias}.assigned_department_id, ${workOrderAlias}.department_id) IN (${placeholders})
-      OR ${taskAlias}.assigned_user_id = ?)`,
-    params: [...departmentIds, ...departmentIds, userId]
+    clause: `(${taskAlias}.assigned_user_id = ?
+      OR EXISTS (
+        SELECT 1 FROM production_process_supervisors scope_supervisor
+        WHERE scope_supervisor.process_id = ${taskAlias}.process_id AND scope_supervisor.user_id = ?
+      )
+      OR EXISTS (
+        SELECT 1 FROM production_process_user_authorizations scope_user
+        WHERE scope_user.process_id = ${taskAlias}.process_id AND scope_user.user_id = ?
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM production_process_role_authorizations scope_role_auth
+        INNER JOIN user_roles scope_user_role ON scope_user_role.role_id = scope_role_auth.role_id
+        INNER JOIN roles scope_role ON scope_role.id = scope_user_role.role_id
+        WHERE scope_role_auth.process_id = ${taskAlias}.process_id
+          AND scope_user_role.user_id = ? AND scope_role.status = 'active'
+      ))`,
+    params: [userId, userId, userId, userId]
   };
 }
 
@@ -765,7 +795,7 @@ function repairScopeWhere(userId: number, repairAlias = "r", workOrderAlias = "w
   const taskScope = taskScopeWhere(userId, workOrderAlias, taskAlias);
   if (isSystemAdmin(userId)) return taskScope;
   const repairProcessScope = hasPermission(userId, "production.repairs.view") && isUserAuthorizedForRepairProcess(userId)
-    ? departmentTaskScopeWhere(userId, workOrderAlias, taskAlias)
+    ? taskScopeWhere(userId, workOrderAlias, taskAlias)
     : null;
   if (repairProcessScope) {
     return {
@@ -783,12 +813,15 @@ function qualityScopeWhere(userId: number, qualityAlias = "qc", workOrderAlias =
   const taskScope = taskScopeWhere(userId, workOrderAlias, taskAlias);
   if (isSystemAdmin(userId)) return taskScope;
   if (!hasPermission(userId, "quality.inspection.manage")) return taskScope;
-  const departmentScope = departmentTaskScopeWhere(userId, workOrderAlias, taskAlias);
   return {
-    clause: `(${taskScope.clause} OR (${departmentScope.clause} AND (EXISTS (
+    clause: `(${taskScope.clause} OR (EXISTS (
       SELECT 1
       FROM production_process_user_authorizations quality_user_auth
       WHERE quality_user_auth.process_id = ${qualityAlias}.process_id AND quality_user_auth.user_id = ?
+    ) OR EXISTS (
+      SELECT 1
+      FROM production_process_supervisors quality_supervisor
+      WHERE quality_supervisor.process_id = ${qualityAlias}.process_id AND quality_supervisor.user_id = ?
     ) OR EXISTS (
       SELECT 1
       FROM production_process_role_authorizations quality_role_auth
@@ -796,8 +829,8 @@ function qualityScopeWhere(userId: number, qualityAlias = "qc", workOrderAlias =
       INNER JOIN roles quality_role ON quality_role.id = quality_user_role.role_id
       WHERE quality_role_auth.process_id = ${qualityAlias}.process_id
         AND quality_user_role.user_id = ? AND quality_role.status = 'active'
-    ))))`,
-    params: [...taskScope.params, ...departmentScope.params, userId, userId]
+    )))`,
+    params: [...taskScope.params, userId, userId, userId]
   };
 }
 
@@ -805,9 +838,7 @@ function assertQualityManageAccess(userId: number, task: TaskRow) {
   if (isSystemAdmin(userId) || task.assignedUserId === userId) return;
   if (
     hasPermission(userId, "quality.inspection.manage") &&
-    isUserAuthorizedForProcess(userId, task.processId) &&
-    (canAccessDepartment(userId, task.workOrderDepartmentId) ||
-      (task.assignedDepartmentId !== null && canAccessDepartment(userId, task.assignedDepartmentId)))
+    isUserAuthorizedForProcess(userId, task.processId)
   ) {
     return;
   }
@@ -1303,7 +1334,6 @@ function routeTaskAfterProduction(taskId: number, actorUserId: number) {
 function normalizeRouteSteps(
   steps: Array<{
     processId?: number;
-    defaultDepartmentId?: number | null;
     outputTarget?: OutputTarget;
     outputItemId?: number | null;
     outputWarehouseId?: number | null;
@@ -1317,8 +1347,6 @@ function normalizeRouteSteps(
     const processId = parseId(step.processId, `第 ${index + 1} 道工序`);
     const process = getProcess(processId);
     if (!process || process.status !== "active") throw businessError(`第 ${index + 1} 道工序不存在或已停用`);
-    const defaultDepartmentId = parseOptionalId(step.defaultDepartmentId, `第 ${index + 1} 道工序执行部门`);
-    if (defaultDepartmentId) getActiveDepartment(defaultDepartmentId, `第 ${index + 1} 道工序执行部门`);
     const outputTarget = step.outputTarget ?? "next_process";
     if (!["next_process", "semi_finished", "finished_goods", "repair"].includes(outputTarget)) {
       throw businessError(`第 ${index + 1} 道工序输出去向不合法`);
@@ -1343,7 +1371,7 @@ function normalizeRouteSteps(
     }
     return {
       processId,
-      defaultDepartmentId,
+      defaultDepartmentId: null,
       outputTarget,
       outputItemId,
       outputWarehouseId,
@@ -1365,7 +1393,6 @@ type WorkOrderCreateInput = {
   productItemId?: number;
   routeId?: number;
   plannedQuantity?: number;
-  departmentId?: number;
   managerUserId?: number | null;
   priority?: WorkOrderPriority;
   plannedStartDate?: string;
@@ -1414,17 +1441,24 @@ type NormalizedWorkOrderItem = {
   remark: string;
 };
 
-function validateWorkOrderHeader(actorUserId: number, body: WorkOrderCreateInput) {
-  const departmentId = parseId(body.departmentId, "生产部门");
-  getActiveDepartment(departmentId, "生产部门");
-  if (!canAccessDepartment(actorUserId, departmentId)) {
-    throw businessError("当前账号没有该生产部门的数据范围", 403);
-  }
+function getFallbackProductionDepartmentId() {
+  const department = db
+    .prepare("SELECT id FROM departments WHERE status = 'active' ORDER BY CASE code WHEN 'PRODUCTION' THEN 0 ELSE 1 END, id LIMIT 1")
+    .get() as { id: number } | undefined;
+  if (!department) throw businessError("系统未配置可用的生产归属，请先初始化基础组织数据", 409);
+  return department.id;
+}
+
+function validateWorkOrderHeader(actorUserId: number, body: WorkOrderCreateInput, startProcessId: number | null = null) {
+  const departmentId = getFallbackProductionDepartmentId();
   const managerUserId = parseOptionalId(body.managerUserId, "工单负责人");
   if (managerUserId) {
     const manager = getActiveUser(managerUserId);
-    if (!manager || manager.status !== "active" || !canAccessDepartment(managerUserId, departmentId)) {
-      throw businessError("工单负责人必须是该生产部门范围内的启用员工");
+    if (!manager || manager.status !== "active") {
+      throw businessError("工单负责人不存在或已停用");
+    }
+    if (startProcessId !== null && !isUserAuthorizedForProcess(managerUserId, startProcessId)) {
+      throw businessError("工单负责人必须拥有起始工序授权");
     }
   }
   return { departmentId, managerUserId };
@@ -1709,7 +1743,7 @@ function generateWorkOrderTasks(workOrder: WorkOrderRow) {
         step.id,
         step.processId,
         step.stepNo,
-        step.defaultDepartmentId ?? workOrder.departmentId,
+        null,
         step.outputTarget,
         step.qualityGate,
         step.outputItemId ?? (step.outputTarget === "finished_goods" ? item.productItemId : null),
@@ -1787,33 +1821,38 @@ export async function registerProductionRoutes(
     };
   });
 
-  app.get("/api/production/authorization-options", { preHandler: requirePermission("production.processes.manage") }, async () => ({
-    roles: db.prepare("SELECT id, name, code FROM roles WHERE status = 'active' ORDER BY id").all(),
-    users: db
-      .prepare(
-        `SELECT u.id, u.display_name AS displayName, u.employee_no AS employeeNo,
-                u.position, u.department_id AS departmentId, d.name AS departmentName
-         FROM users u
-         LEFT JOIN departments d ON d.id = u.department_id
-         WHERE u.status = 'active'
-         ORDER BY u.id`
-      )
-      .all(),
-    departments: db.prepare("SELECT id, name, code FROM departments WHERE status = 'active' ORDER BY id").all(),
-    warehouses: db
-      .prepare(
-        `SELECT w.id, w.code, w.name, w.department_id AS departmentId,
-                w.warehouse_type AS warehouseType, d.name AS departmentName
-         FROM warehouses w
-         INNER JOIN departments d ON d.id = w.department_id
-         WHERE w.status = 'active'
-         ORDER BY w.id`
-      )
-      .all()
-  }));
+  app.get<{ Querystring: { processId?: string } }>("/api/production/authorization-options", { preHandler: requirePermission("production.processes.manage") }, async (request) => {
+    const processId = request.query.processId ? parseId(request.query.processId, "工序") : null;
+    const roleWhere = processId
+      ? "r.status = 'active' AND EXISTS (SELECT 1 FROM production_process_role_authorizations pra WHERE pra.role_id = r.id AND pra.process_id = ?)"
+      : "1 = 0";
+    const roleParams = processId ? [processId] : [];
+    return {
+      roles: db.prepare(`SELECT r.id, r.name, r.code FROM roles r WHERE ${roleWhere} ORDER BY r.id`).all(...roleParams),
+      users: db
+        .prepare(
+          `SELECT u.id, u.display_name AS displayName, u.employee_no AS employeeNo,
+                  u.position, u.department_id AS departmentId, d.name AS departmentName
+           FROM users u
+           LEFT JOIN departments d ON d.id = u.department_id
+           WHERE u.status = 'active'
+           ORDER BY u.id`
+        )
+        .all(),
+      warehouses: db
+        .prepare(
+          `SELECT w.id, w.code, w.name, w.department_id AS departmentId,
+                  w.warehouse_type AS warehouseType, d.name AS departmentName
+           FROM warehouses w
+           INNER JOIN departments d ON d.id = w.department_id
+           WHERE w.status = 'active'
+           ORDER BY w.id`
+        )
+        .all()
+    };
+  });
 
   app.get("/api/production/route-options", { preHandler: requirePermission("production.routes.manage") }, async () => ({
-    departments: db.prepare("SELECT id, name, code FROM departments WHERE status = 'active' ORDER BY id").all(),
     warehouses: db
       .prepare(
         `SELECT w.id, w.code, w.name, w.department_id AS departmentId,
@@ -1831,6 +1870,7 @@ export async function registerProductionRoutes(
       .prepare(
         `SELECT p.id, p.code, p.name, p.process_type AS processType, p.sort_order AS sortOrder,
                 p.description, p.status,
+                (SELECT COUNT(*) FROM production_process_supervisors pps WHERE pps.process_id = p.id) AS supervisorCount,
                 (SELECT COUNT(*) FROM production_process_role_authorizations pra WHERE pra.process_id = p.id) AS authorizedRoleCount,
                 (SELECT COUNT(*) FROM production_process_user_authorizations pua WHERE pua.process_id = p.id) AS authorizedUserCount
          FROM production_processes p
@@ -1857,6 +1897,7 @@ export async function registerProductionRoutes(
         .prepare("INSERT INTO production_processes (code, name, process_type, sort_order, description) VALUES (?, ?, ?, ?, ?)")
         .run(code, name, request.body.processType ?? "manufacturing", Number(request.body.sortOrder ?? 0), request.body.description?.trim() ?? "");
       const id = Number(result.lastInsertRowid);
+      syncProcessRoleTemplates();
       recordAudit(request.user.id, "CREATE", "production_process", id, `创建工序 ${name}`, clientIp(request));
       return { item: getProcess(id) };
     } catch {
@@ -1887,6 +1928,7 @@ export async function registerProductionRoutes(
         request.body.status ?? null,
         id
       );
+      syncProcessRoleTemplates();
       recordAudit(request.user.id, "UPDATE", "production_process", id, `更新工序 ${id}`, clientIp(request));
       return { item: getProcess(id) };
     } catch {
@@ -1920,21 +1962,38 @@ export async function registerProductionRoutes(
 
   app.put<{
     Params: { id: string };
-    Body: { roleIds?: number[]; userIds?: number[] };
+    Body: { supervisorIds?: number[]; roleIds?: number[]; userIds?: number[] };
   }>("/api/production/processes/:id/authorizations", { preHandler: requirePermission("production.processes.manage") }, async (request) => {
     const id = parseId(request.params.id, "工序");
-    if (!getProcess(id)) throw app.httpErrors.notFound("工序不存在");
+    const process = getProcess(id);
+    if (!process) throw app.httpErrors.notFound("工序不存在");
+    const supervisorIds = [...new Set((request.body.supervisorIds ?? []).map(Number))].filter((value) => Number.isInteger(value) && value > 0);
     const roleIds = [...new Set((request.body.roleIds ?? []).map(Number))].filter((value) => Number.isInteger(value) && value > 0);
     const userIds = [...new Set((request.body.userIds ?? []).map(Number))].filter((value) => Number.isInteger(value) && value > 0);
-    if (!roleIds.length && !userIds.length) throw app.httpErrors.badRequest("工序至少需要授权一个角色或员工");
+    if (!supervisorIds.length) throw app.httpErrors.badRequest("工序至少需要指定一名主管");
+    const defaultRoleIds = (
+      db
+        .prepare(`SELECT id FROM roles WHERE status = 'active' AND code IN (?, ?)`)
+        .all(getProcessRoleCode(process.code, "manager"), getProcessRoleCode(process.code, "operator")) as Array<{ id: number }>
+    ).map((role) => role.id);
+    const authorizedRoleIds = [...new Set([...roleIds, ...defaultRoleIds])];
+    if (!authorizedRoleIds.length && !userIds.length) throw app.httpErrors.badRequest("工序至少需要授权一个角色或员工");
     const transaction = db.transaction(() => {
-      if (roleIds.length) {
+      if (supervisorIds.length) {
         const count = (
-          db.prepare(`SELECT COUNT(*) AS count FROM roles WHERE status = 'active' AND id IN (${roleIds.map(() => "?").join(",")})`).get(...roleIds) as {
+          db.prepare(`SELECT COUNT(*) AS count FROM users WHERE status = 'active' AND id IN (${supervisorIds.map(() => "?").join(",")})`).get(...supervisorIds) as {
             count: number;
           }
         ).count;
-        if (count !== roleIds.length) throw businessError("存在无效或停用角色");
+        if (count !== supervisorIds.length) throw businessError("存在无效或停用主管");
+      }
+      if (authorizedRoleIds.length) {
+        const count = (
+          db.prepare(`SELECT COUNT(*) AS count FROM roles WHERE status = 'active' AND id IN (${authorizedRoleIds.map(() => "?").join(",")})`).get(...authorizedRoleIds) as {
+            count: number;
+          }
+        ).count;
+        if (count !== authorizedRoleIds.length) throw businessError("存在无效或停用角色");
       }
       if (userIds.length) {
         const count = (
@@ -1944,11 +2003,14 @@ export async function registerProductionRoutes(
         ).count;
         if (count !== userIds.length) throw businessError("存在无效或停用员工");
       }
+      db.prepare("DELETE FROM production_process_supervisors WHERE process_id = ?").run(id);
       db.prepare("DELETE FROM production_process_role_authorizations WHERE process_id = ?").run(id);
       db.prepare("DELETE FROM production_process_user_authorizations WHERE process_id = ?").run(id);
+      const insertSupervisor = db.prepare("INSERT INTO production_process_supervisors (process_id, user_id) VALUES (?, ?)");
       const insertRole = db.prepare("INSERT INTO production_process_role_authorizations (process_id, role_id) VALUES (?, ?)");
       const insertUser = db.prepare("INSERT INTO production_process_user_authorizations (process_id, user_id) VALUES (?, ?)");
-      roleIds.forEach((roleId) => insertRole.run(id, roleId));
+      supervisorIds.forEach((userId) => insertSupervisor.run(id, userId));
+      authorizedRoleIds.forEach((roleId) => insertRole.run(id, roleId));
       userIds.forEach((userId) => insertUser.run(id, userId));
     });
     transaction();
@@ -1957,25 +2019,14 @@ export async function registerProductionRoutes(
   });
 
   app.get<{
-    Querystring: { processId?: string; departmentId?: string };
+    Querystring: { processId?: string; processCode?: string };
   }>("/api/production/operators", { preHandler: requirePermission("production.tasks.view") }, async (request) => {
-    const processId = request.query.processId ? parseId(request.query.processId, "工序") : null;
-    const departmentId = request.query.departmentId ? parseId(request.query.departmentId, "部门") : null;
+    let processId = request.query.processId ? parseId(request.query.processId, "工序") : null;
+    if (!processId && request.query.processCode?.trim()) {
+      processId = assertProcessCodeAuthorization(request.user.id, request.query.processCode.trim().toUpperCase()).id;
+    }
     const clauses = ["u.status = 'active'"];
     const params: Array<number | string> = [];
-    if (departmentId) {
-      getActiveDepartment(departmentId);
-      if (!isSystemAdmin(request.user.id) && !canAccessDepartment(request.user.id, departmentId)) {
-        throw app.httpErrors.forbidden("当前账号没有该部门的员工查看范围");
-      }
-      clauses.push("u.department_id = ?");
-      params.push(departmentId);
-    } else if (!isSystemAdmin(request.user.id)) {
-      const departments = getUserDepartmentIds(request.user.id);
-      if (!departments.length) return { items: [] };
-      clauses.push(`u.department_id IN (${departments.map(() => "?").join(",")})`);
-      params.push(...departments);
-    }
     clauses.push(
       `EXISTS (
         SELECT 1
@@ -1988,8 +2039,12 @@ export async function registerProductionRoutes(
     );
     if (processId) {
       if (!getProcess(processId)) throw app.httpErrors.notFound("工序不存在");
+      if (!isSystemAdmin(request.user.id) && !isUserAuthorizedForProcess(request.user.id, processId)) {
+        throw app.httpErrors.forbidden("当前账号没有该工序员工查看范围");
+      }
       clauses.push(
-        `(EXISTS (SELECT 1 FROM production_process_user_authorizations pua WHERE pua.process_id = ? AND pua.user_id = u.id)
+        `(EXISTS (SELECT 1 FROM production_process_supervisors pps WHERE pps.process_id = ? AND pps.user_id = u.id)
+          OR EXISTS (SELECT 1 FROM production_process_user_authorizations pua WHERE pua.process_id = ? AND pua.user_id = u.id)
           OR EXISTS (
             SELECT 1
             FROM production_process_role_authorizations pra
@@ -1998,7 +2053,7 @@ export async function registerProductionRoutes(
             WHERE pra.process_id = ? AND ur.user_id = u.id AND r.status = 'active'
           ))`
       );
-      params.push(processId, processId);
+      params.push(processId, processId, processId);
     }
     return {
       items: db
@@ -2230,18 +2285,16 @@ export async function registerProductionRoutes(
   app.get<{
     Querystring: { status?: WorkOrderStatus | "all" };
   }>("/api/production/work-orders", { preHandler: requirePermission("production.workorders.view") }, async (request) => {
-    const departmentIds = isSystemAdmin(request.user.id) || hasDepartmentManagementAuthority(request.user.id)
-      ? (isSystemAdmin(request.user.id) ? null : getUserDepartmentIds(request.user.id))
-      : null;
     const clauses = ["1 = 1"];
     const params: Array<number | string> = [];
-    if (!isSystemAdmin(request.user.id) && !hasDepartmentManagementAuthority(request.user.id)) {
-      clauses.push("EXISTS (SELECT 1 FROM production_tasks own_task WHERE own_task.work_order_id = wo.id AND own_task.assigned_user_id = ?)");
-      params.push(request.user.id);
-    } else if (departmentIds) {
-      if (!departmentIds.length) return { items: [] };
-      clauses.push(`wo.department_id IN (${departmentIds.map(() => "?").join(",")})`);
-      params.push(...departmentIds);
+    if (!isSystemAdmin(request.user.id)) {
+      const scope = taskScopeWhere(request.user.id, "wo", "scope_task");
+      clauses.push(`EXISTS (
+        SELECT 1
+        FROM production_tasks scope_task
+        WHERE scope_task.work_order_id = wo.id AND ${scope.clause}
+      )`);
+      params.push(...scope.params);
     }
     if (request.query.status && request.query.status !== "all") {
       clauses.push("wo.status = ?");
@@ -2379,7 +2432,7 @@ export async function registerProductionRoutes(
       const processCode = request.params.processCode.trim().toUpperCase();
       const startProcess = assertProcessCodeAuthorization(request.user.id, processCode);
       try {
-        const header = validateWorkOrderHeader(request.user.id, request.body);
+        const header = validateWorkOrderHeader(request.user.id, request.body, startProcess.id);
         const normalizedItems = normalizeWorkOrderItems(request.body, startProcess);
         const id = db.transaction(() => {
           const createdWorkOrderId = insertWorkOrderRecord(
@@ -2414,7 +2467,7 @@ export async function registerProductionRoutes(
     const id = parseId(request.params.id, "生产工单");
     const workOrder = getWorkOrder(id);
     if (!workOrder) throw app.httpErrors.notFound("生产工单不存在");
-    if (!canAccessDepartment(request.user.id, workOrder.departmentId)) throw app.httpErrors.forbidden("当前账号没有该生产工单的数据范围");
+    assertWorkOrderAccess(request.user.id, workOrder);
     if (workOrder.status !== "draft") throw app.httpErrors.conflict("只有草稿工单可以下达");
     db.transaction(() => generateWorkOrderTasks(workOrder))();
     recordAudit(request.user.id, "RELEASE", "production_work_order", id, `下达生产工单 ${workOrder.workOrderNo}`, clientIp(request));
@@ -2425,7 +2478,7 @@ export async function registerProductionRoutes(
     const id = parseId(request.params.id, "生产工单");
     const workOrder = getWorkOrder(id);
     if (!workOrder) throw app.httpErrors.notFound("生产工单不存在");
-    if (!canAccessDepartment(request.user.id, workOrder.departmentId)) throw app.httpErrors.forbidden("当前账号没有该生产工单的数据范围");
+    assertWorkOrderAccess(request.user.id, workOrder);
     if (!["draft", "released"].includes(workOrder.status) || workOrder.executionStatus !== "normal") {
       throw app.httpErrors.conflict("只有正常状态的草稿或已下达但未生产工单可以取消");
     }
@@ -2443,7 +2496,7 @@ export async function registerProductionRoutes(
     const id = parseId(request.params.id, "生产工单");
     const workOrder = getWorkOrder(id);
     if (!workOrder) throw app.httpErrors.notFound("生产工单不存在");
-    if (!canAccessDepartment(request.user.id, workOrder.departmentId)) throw app.httpErrors.forbidden("当前账号没有该生产工单的数据范围");
+    assertWorkOrderAccess(request.user.id, workOrder);
     if (workOrder.status === "closed") {
       return { item: workOrder };
     }
@@ -2843,32 +2896,27 @@ export async function registerProductionRoutes(
 
   app.post<{
     Params: { id: string };
-    Body: { assignedDepartmentId?: number | null; assignedUserId?: number | null; remark?: string };
+    Body: { assignedUserId?: number | null; remark?: string };
   }>("/api/production/tasks/:id/assign", { preHandler: requirePermission("production.tasks.manage") }, async (request) => {
     const id = parseId(request.params.id, "工序任务");
     const task = assertTaskManageAccess(request.user.id, id);
     if (!["pending", "ready"].includes(task.status) || task.flowStatus !== "active") {
       throw app.httpErrors.conflict("只有待流转或待开工的任务可以派工");
     }
-    const assignedDepartmentId = parseId(request.body.assignedDepartmentId, "派工部门");
     const assignedUserId = parseId(request.body.assignedUserId, "执行员工");
-    if (task.assignedDepartmentId && task.assignedDepartmentId !== assignedDepartmentId) {
-      throw app.httpErrors.badRequest("该任务执行部门由工艺路线预设，不能跨部门派工");
-    }
-    getActiveDepartment(assignedDepartmentId, "派工部门");
     const operator = getActiveUser(assignedUserId);
-    if (!operator || operator.status !== "active" || operator.departmentId !== assignedDepartmentId) {
-      throw app.httpErrors.badRequest("执行员工必须是派工部门内的启用员工");
+    if (!operator || operator.status !== "active") {
+      throw app.httpErrors.badRequest("执行员工不存在或已停用");
     }
     if (!hasPermission(assignedUserId, "production.operations.execute") || !isUserAuthorizedForProcess(assignedUserId, task.processId)) {
       throw app.httpErrors.badRequest("执行员工没有该工序的报工授权");
     }
     db.prepare(
       `UPDATE production_tasks
-       SET assigned_department_id = ?, assigned_user_id = ?, remark = COALESCE(?, remark),
+       SET assigned_department_id = NULL, assigned_user_id = ?, remark = COALESCE(?, remark),
            updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`
-    ).run(assignedDepartmentId, assignedUserId, request.body.remark?.trim() || null, id);
+    ).run(assignedUserId, request.body.remark?.trim() || null, id);
     recordAudit(request.user.id, "ASSIGN", "production_task", id, `派工工序任务 ${task.taskNo} 给 ${operator.displayName}`, clientIp(request));
     return { item: getTask(id) };
   });

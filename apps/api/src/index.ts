@@ -132,7 +132,7 @@ function ensurePassword(password: string) {
   if (password.length < 10) throw app.httpErrors.badRequest("密码至少需要 10 位");
 }
 
-function ensureActiveDepartment(departmentId: number | null | undefined, label = "所属部门") {
+function ensureActiveDepartment(departmentId: number | null | undefined, label = "所属工序部门") {
   if (departmentId == null) return null;
   const department = db
     .prepare("SELECT id FROM departments WHERE id = ? AND status = 'active'")
@@ -154,7 +154,7 @@ function ensureActiveRoleIds(roleIds: number[], required = true) {
 
 function ensureManagedDepartmentIds(departmentIds: number[]) {
   const ids = [...new Set(departmentIds.map(Number))].filter((id) => Number.isInteger(id) && id > 0);
-  for (const id of ids) ensureActiveDepartment(id, "经理管理部门");
+  for (const id of ids) ensureActiveDepartment(id, "主管工序范围");
   return ids;
 }
 
@@ -267,11 +267,11 @@ app.get("/api/dashboard", { preHandler: requirePermission("system.dashboard.view
     cards: [
       { key: "users", label: "启用员工", value: users.count, tone: "blue" },
       { key: "roles", label: "启用角色", value: roles.count, tone: "green" },
-      { key: "departments", label: "组织部门", value: departments.count, tone: "amber" },
+      { key: "departments", label: "工序部门", value: departments.count, tone: "amber" },
       { key: "audits", label: "今日审计事件", value: audits.count, tone: "red" }
     ],
     todo: [
-      { title: "账号与岗位权限初始化", status: "当前阶段", detail: "完善员工、部门、角色和权限数据" },
+      { title: "账号与岗位权限初始化", status: "当前阶段", detail: "完善员工、工序部门、角色和权限数据" },
       { title: "生产工序权限预留", status: "下一阶段", detail: "接入工单、工序任务和人工报工" },
       { title: "质量与仓储模块预留", status: "后续扩展", detail: "接入库存状态、测试、维修和放行" }
     ]
@@ -317,16 +317,16 @@ app.post<{
   const name = request.body.name?.trim();
   const code = request.body.code?.trim().toUpperCase();
   const description = request.body.description?.trim() ?? "";
-  if (!name || !code) throw app.httpErrors.badRequest("部门名称和编码不能为空");
+  if (!name || !code) throw app.httpErrors.badRequest("工序部门名称和编码不能为空");
   try {
     const result = db
       .prepare("INSERT INTO departments (name, code, description) VALUES (?, ?, ?)")
       .run(name, code, description);
     const departmentId = Number(result.lastInsertRowid);
-    recordAudit(request.user.id, "CREATE", "department", departmentId, `创建部门 ${name}`, clientIp(request));
+    recordAudit(request.user.id, "CREATE", "department", departmentId, `创建工序部门 ${name}`, clientIp(request));
     return { item: db.prepare("SELECT * FROM departments WHERE id = ?").get(departmentId) };
   } catch {
-    throw app.httpErrors.conflict("部门名称或编码已存在");
+    throw app.httpErrors.conflict("工序部门名称或编码已存在");
   }
 });
 
@@ -350,7 +350,7 @@ app.get("/api/users", { preHandler: requirePermission("system.users.view") }, as
           FROM users u
           LEFT JOIN departments d ON d.id = u.department_id
           LEFT JOIN user_roles ur ON ur.user_id = u.id
-          LEFT JOIN roles r ON r.id = ur.role_id
+          LEFT JOIN roles r ON r.id = ur.role_id AND (r.code = 'SYSTEM_ADMIN' OR r.code LIKE 'PROC-%')
           GROUP BY u.id
           ORDER BY u.id DESC
         `
@@ -507,13 +507,22 @@ app.get("/api/roles", { preHandler: requirePermission("system.roles.view") }, as
       .prepare(
         `
           SELECT r.id, r.name, r.code, r.description, r.status,
+                 p.id AS processId, p.code AS processCode, p.name AS processName,
+                 CASE
+                   WHEN r.code = p.code || '-MANAGER' THEN 'manager'
+                   WHEN r.code = p.code || '-OPERATOR' THEN 'operator'
+                   ELSE 'system'
+                 END AS roleKind,
                  COUNT(DISTINCT ur.user_id) AS userCount,
                  COUNT(DISTINCT rp.permission_id) AS permissionCount
           FROM roles r
+          LEFT JOIN production_processes p
+                 ON r.code IN (p.code || '-MANAGER', p.code || '-OPERATOR')
           LEFT JOIN user_roles ur ON ur.role_id = r.id
           LEFT JOIN role_permissions rp ON rp.role_id = r.id
+          WHERE r.code LIKE 'PROC-%'
           GROUP BY r.id
-          ORDER BY r.id
+          ORDER BY CASE WHEN r.code = 'SYSTEM_ADMIN' THEN 0 ELSE 1 END, p.sort_order, p.id, roleKind
         `
       )
       .all()
@@ -524,27 +533,29 @@ app.post<{
   Body: { name?: string; code?: string; description?: string };
 }>("/api/roles", { preHandler: requirePermission("system.roles.manage") }, async (request) => {
   ensureSystemAdmin(request.user.id);
-  const name = request.body.name?.trim();
-  const code = request.body.code?.trim().toUpperCase();
-  const description = request.body.description?.trim() ?? "";
-  if (!name || !code) throw app.httpErrors.badRequest("角色名称和编码不能为空");
-  try {
-    const result = db
-      .prepare("INSERT INTO roles (name, code, description) VALUES (?, ?, ?)")
-      .run(name, code, description);
-    const roleId = Number(result.lastInsertRowid);
-    recordAudit(request.user.id, "CREATE", "role", roleId, `创建角色 ${name}`, clientIp(request));
-    return { item: db.prepare("SELECT * FROM roles WHERE id = ?").get(roleId) };
-  } catch {
-    throw app.httpErrors.conflict("角色名称或编码已存在");
-  }
+  throw app.httpErrors.badRequest("工序角色由工序流程自动生成，请在工序流程中新增或编辑工序");
 });
 
 app.get<{
   Params: { id: string };
 }>("/api/roles/:id", { preHandler: requirePermission("system.roles.view") }, async (request) => {
   const id = Number(request.params.id);
-  const role = db.prepare("SELECT id, name, code, description, status FROM roles WHERE id = ?").get(id);
+  const role = db
+    .prepare(
+      `SELECT r.id, r.name, r.code, r.description, r.status,
+              p.id AS processId, p.code AS processCode, p.name AS processName,
+              CASE
+                WHEN r.code = p.code || '-MANAGER' THEN 'manager'
+                WHEN r.code = p.code || '-OPERATOR' THEN 'operator'
+                ELSE 'system'
+              END AS roleKind
+       FROM roles r
+       LEFT JOIN production_processes p
+              ON r.code IN (p.code || '-MANAGER', p.code || '-OPERATOR')
+       WHERE r.id = ?
+         AND r.code LIKE 'PROC-%'`
+    )
+    .get(id);
   if (!role) throw app.httpErrors.notFound("角色不存在");
   const permissions = db
     .prepare(

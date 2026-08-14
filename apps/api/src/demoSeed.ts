@@ -40,6 +40,8 @@ type DemoOutputTarget = "next_process" | "semi_finished" | "finished_goods";
 
 const DEMO_SENTINEL_USERNAME = "demo.warehouse";
 
+const processRoleCode = (processCode: string, kind: "manager" | "operator") => `${processCode}-${kind === "manager" ? "MANAGER" : "OPERATOR"}`;
+
 function requireId(table: "departments" | "roles" | "units" | "item_categories" | "item_attribute_definitions" | "warehouses", code: string) {
   const row = db.prepare(`SELECT id FROM ${table} WHERE code = ?`).get(code) as IdRow | undefined;
   if (!row) throw new Error(`演示数据依赖的 ${table} 编码不存在：${code}`);
@@ -502,13 +504,13 @@ function ensureProductionDemoData() {
     sortOrder: 80,
     description: "日检合格后申请成品入库"
   });
-  ensureProcessRoleAuthorization(bgaProcessId, ["OPERATOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]);
-  ensureProcessRoleAuthorization(chipInitialTestProcessId, ["QUALITY_INSPECTOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]);
-  ensureProcessRoleAuthorization(outsourceProcessId, ["OPERATOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]);
-  ensureProcessRoleAuthorization(chipRetestProcessId, ["QUALITY_INSPECTOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]);
-  ensureProcessRoleAuthorization(smtProcessId, ["OPERATOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]);
-  ensureProcessRoleAuthorization(agingProcessId, ["QUALITY_INSPECTOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]);
-  ensureProcessRoleAuthorization(fqcProcessId, ["QUALITY_INSPECTOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]);
+  ensureProcessRoleAuthorization(bgaProcessId, [processRoleCode("PROC-BGA", "manager"), processRoleCode("PROC-BGA", "operator")]);
+  ensureProcessRoleAuthorization(chipInitialTestProcessId, [processRoleCode("PROC-CHIP-TEST", "manager"), processRoleCode("PROC-CHIP-TEST", "operator")]);
+  ensureProcessRoleAuthorization(outsourceProcessId, [processRoleCode("PROC-OUTSOURCE", "manager"), processRoleCode("PROC-OUTSOURCE", "operator")]);
+  ensureProcessRoleAuthorization(chipRetestProcessId, [processRoleCode("PROC-CHIP-RETEST", "manager"), processRoleCode("PROC-CHIP-RETEST", "operator")]);
+  ensureProcessRoleAuthorization(smtProcessId, [processRoleCode("PROC-SMT", "manager"), processRoleCode("PROC-SMT", "operator")]);
+  ensureProcessRoleAuthorization(agingProcessId, [processRoleCode("PROC-AGING", "manager"), processRoleCode("PROC-AGING", "operator")]);
+  ensureProcessRoleAuthorization(fqcProcessId, [processRoleCode("PROC-FQC", "manager"), processRoleCode("PROC-FQC", "operator")]);
 
   const routeId = ensureProductionRoute({
     code: "ROUTE-MEMORY-STANDARD",
@@ -718,11 +720,11 @@ export function seedDemoData() {
     const managerId = ensureUser({
       username: "demo.manager",
       password: "demo123",
-      displayName: "演示部门经理",
+      displayName: "演示工序主管",
       employeeNo: "DEMO-0001",
       position: "仓储与生产经理",
       departmentCode: "WAREHOUSE",
-      roleCode: "DEPARTMENT_MANAGER",
+      roleCode: processRoleCode("PROC-BGA", "manager"),
       managedDepartmentCodes: ["PRODUCTION", "QUALITY"]
     });
     const warehouseUserId = ensureUser({
@@ -732,7 +734,7 @@ export function seedDemoData() {
       employeeNo: "DEMO-0002",
       position: "仓库管理员",
       departmentCode: "WAREHOUSE",
-      roleCode: "WAREHOUSE_OPERATOR"
+      roleCode: processRoleCode("PROC-BGA", "operator")
     });
     const qualityUserId = ensureUser({
       username: "demo.quality",
@@ -741,7 +743,7 @@ export function seedDemoData() {
       employeeNo: "DEMO-0003",
       position: "来料检验员",
       departmentCode: "QUALITY",
-      roleCode: "QUALITY_INSPECTOR"
+      roleCode: processRoleCode("PROC-CHIP-TEST", "operator")
     });
     ensureUser({
       username: "demo.production",
@@ -750,7 +752,7 @@ export function seedDemoData() {
       employeeNo: "DEMO-0004",
       position: "生产主管",
       departmentCode: "PRODUCTION",
-      roleCode: "PRODUCTION_MANAGER"
+      roleCode: processRoleCode("PROC-SMT", "manager")
     });
     ensureUser({
       username: "demo.operator",
@@ -759,7 +761,7 @@ export function seedDemoData() {
       employeeNo: "DEMO-0005",
       position: "装配工序员",
       departmentCode: "PRODUCTION",
-      roleCode: "OPERATOR"
+      roleCode: processRoleCode("PROC-SMT", "operator")
     });
 
     const memoryCategoryId = ensureCategory("DEMO-MEMORY", "内存条", null, "内存条成品和模块");

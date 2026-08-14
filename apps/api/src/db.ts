@@ -30,8 +30,8 @@ export const permissionCatalog = [
   ["system.users.manage", "系统", "管理", "新增、编辑、停用员工账号"],
   ["system.roles.view", "系统", "查看", "查看角色与权限"],
   ["system.roles.manage", "系统", "管理", "创建角色、分配权限"],
-  ["system.departments.view", "组织", "查看", "查看部门与岗位"],
-  ["system.departments.manage", "组织", "管理", "新增、编辑部门"],
+  ["system.departments.view", "工序", "查看", "查看工序部门与岗位"],
+  ["system.departments.manage", "工序", "管理", "新增、编辑工序部门"],
   ["system.audit.view", "系统", "查看", "查看操作审计日志"],
   ["production.dashboard.view", "生产", "查看", "查看生产工作台"],
   ["production.processes.view", "生产", "查看", "查看工序定义"],
@@ -131,7 +131,6 @@ type BuiltinProductionProcess = {
   processType: "manufacturing" | "testing" | "outsourcing" | "repair" | "warehouse" | "inspection";
   sortOrder: number;
   description: string;
-  roleCodes: string[];
 };
 
 const builtinProductionProcesses: BuiltinProductionProcess[] = [
@@ -140,82 +139,167 @@ const builtinProductionProcesses: BuiltinProductionProcess[] = [
     name: "芯片拆卸植球",
     processType: "manufacturing",
     sortOrder: 10,
-    description: "对芯片进行拆卸、植球等前处理",
-    roleCodes: ["OPERATOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
+    description: "对芯片进行拆卸、植球等前处理"
   },
   {
     code: "PROC-DISASSEMBLY",
     name: "生产拆解",
     processType: "manufacturing",
     sortOrder: 15,
-    description: "按生产工单执行成品、半成品或物料的拆解作业",
-    roleCodes: ["OPERATOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
+    description: "按生产工单执行成品、半成品或物料的拆解作业"
   },
   {
     code: "PROC-ASSEMBLY",
     name: "生产组装",
     processType: "manufacturing",
     sortOrder: 16,
-    description: "按生产工单执行半成品、原材料或组件的组装作业",
-    roleCodes: ["OPERATOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
+    description: "按生产工单执行半成品、原材料或组件的组装作业"
   },
   {
     code: "PROC-CHIP-TEST",
     name: "芯片初测",
     processType: "testing",
     sortOrder: 20,
-    description: "植球后测试芯片基础功能，判定可否进入委外加工",
-    roleCodes: ["QUALITY_INSPECTOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
+    description: "植球后测试芯片基础功能，判定可否进入委外加工"
   },
   {
     code: "PROC-OUTSOURCE",
     name: "委外加工",
     processType: "outsourcing",
     sortOrder: 30,
-    description: "记录委外加工流转节点",
-    roleCodes: ["OPERATOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
+    description: "记录委外加工流转节点"
   },
   {
     code: "PROC-CHIP-RETEST",
     name: "委外回厂复测",
     processType: "testing",
     sortOrder: 40,
-    description: "委外加工回厂后进行芯片复测，合格后进入半成品仓等待贴片",
-    roleCodes: ["QUALITY_INSPECTOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
+    description: "委外加工回厂后进行芯片复测，合格后进入半成品仓等待贴片"
   },
   {
     code: "PROC-SMT",
     name: "SMT贴片",
     processType: "manufacturing",
     sortOrder: 50,
-    description: "将颗粒、PCB 和辅料进行贴装",
-    roleCodes: ["OPERATOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
+    description: "将颗粒、PCB 和辅料进行贴装"
   },
   {
     code: "PROC-AGING",
     name: "成品测试老化",
     processType: "testing",
     sortOrder: 60,
-    description: "执行成品功能测试和老化验证",
-    roleCodes: ["QUALITY_INSPECTOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
+    description: "执行成品功能测试和老化验证"
   },
   {
     code: "PROC-REPAIR",
     name: "不良品维修",
     processType: "repair",
     sortOrder: 70,
-    description: "处理测试或生产中产生的不良品",
-    roleCodes: ["QUALITY_INSPECTOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
+    description: "处理测试或生产中产生的不良品"
   },
   {
     code: "PROC-FQC",
     name: "日检合格成品入库",
     processType: "inspection",
     sortOrder: 80,
-    description: "日检合格后申请成品入库",
-    roleCodes: ["QUALITY_INSPECTOR", "PRODUCTION_MANAGER", "DEPARTMENT_MANAGER"]
+    description: "日检合格后申请成品入库"
   }
 ];
+
+type ProcessRoleKind = "manager" | "operator";
+
+export function getProcessRoleCode(processCode: string, kind: ProcessRoleKind) {
+  return `${processCode}-${kind === "manager" ? "MANAGER" : "OPERATOR"}`;
+}
+
+export function getProcessRoleName(processName: string, kind: ProcessRoleKind) {
+  return `${processName}${kind === "manager" ? "主管" : "员工"}`;
+}
+
+export function getProcessRoleDescription(processName: string, kind: ProcessRoleKind) {
+  return `${processName}对应的${kind === "manager" ? "主管" : "员工"}角色`;
+}
+
+function getProcessRolePermissionCodes(processType: BuiltinProductionProcess["processType"], kind: ProcessRoleKind) {
+  const codes = [
+    "system.dashboard.view",
+    "production.tasks.view",
+    "production.operations.execute",
+    "production.reports.view"
+  ];
+  if (kind === "manager") {
+    codes.push("production.dashboard.view");
+    codes.push("production.routes.view");
+    codes.push("production.workorders.view");
+    codes.push("production.workorders.manage");
+    codes.push("production.tasks.manage");
+    codes.push("inventory.items.view");
+    codes.push("system.departments.view");
+  }
+  if (processType === "testing" || processType === "inspection") {
+    codes.push("quality.inspection.view");
+    if (kind === "manager") codes.push("quality.inspection.manage");
+  }
+  if (processType === "repair") {
+    codes.push("production.repairs.view");
+    codes.push("production.scrap-products.view");
+    if (kind === "manager") codes.push("production.repairs.manage");
+  }
+  return [...new Set(codes)];
+}
+
+export function syncProcessRoleTemplates() {
+  const permissionRows = db
+    .prepare("SELECT id, code FROM permissions")
+    .all() as Array<{ id: number; code: string }>;
+  const permissionIdByCode = new Map(permissionRows.map((item) => [item.code, item.id]));
+  const processRows = db
+    .prepare("SELECT id, code, name, process_type AS processType FROM production_processes WHERE status = 'active' ORDER BY sort_order, id")
+    .all() as Array<{ id: number; code: string; name: string; processType: BuiltinProductionProcess["processType"] }>;
+
+  const desiredRoleCodes = new Set<string>();
+  for (const process of processRows) {
+    desiredRoleCodes.add(getProcessRoleCode(process.code, "manager"));
+    desiredRoleCodes.add(getProcessRoleCode(process.code, "operator"));
+  }
+  const desiredCodes = [...desiredRoleCodes];
+  if (desiredCodes.length) {
+    const placeholders = desiredCodes.map(() => "?").join(", ");
+    db.prepare(`DELETE FROM roles WHERE code LIKE 'PROC-%' AND code NOT IN (${placeholders})`).run(...desiredCodes);
+  } else {
+    db.prepare("DELETE FROM roles WHERE code LIKE 'PROC-%'").run();
+  }
+
+  const insertRole = db.prepare("INSERT OR IGNORE INTO roles (name, code, description) VALUES (?, ?, ?)");
+  const updateRole = db.prepare(
+    "UPDATE roles SET name = ?, description = ?, status = 'active', updated_at = CURRENT_TIMESTAMP WHERE code = ?"
+  );
+  const deleteRolePermissions = db.prepare("DELETE FROM role_permissions WHERE role_id = ?");
+  const insertRolePermission = db.prepare(
+    "INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)"
+  );
+  const insertAuthorization = db.prepare(
+    "INSERT OR IGNORE INTO production_process_role_authorizations (process_id, role_id) VALUES (?, ?)"
+  );
+
+  for (const process of processRows) {
+    for (const kind of ["manager", "operator"] as const) {
+      const code = getProcessRoleCode(process.code, kind);
+      const name = getProcessRoleName(process.name, kind);
+      const description = getProcessRoleDescription(process.name, kind);
+      insertRole.run(name, code, description);
+      updateRole.run(name, description, code);
+      const role = db.prepare("SELECT id FROM roles WHERE code = ?").get(code) as { id: number } | undefined;
+      if (!role) continue;
+      deleteRolePermissions.run(role.id);
+      for (const permissionCode of getProcessRolePermissionCodes(process.processType, kind)) {
+        const permissionId = permissionIdByCode.get(permissionCode);
+        if (permissionId) insertRolePermission.run(role.id, permissionId);
+      }
+      insertAuthorization.run(process.id, role.id);
+    }
+  }
+}
 
 const databaseDirectory = path.resolve(process.cwd(), "data");
 fs.mkdirSync(databaseDirectory, { recursive: true });
@@ -669,6 +753,13 @@ export function initializeDatabase() {
       PRIMARY KEY (process_id, user_id)
     );
 
+    CREATE TABLE IF NOT EXISTS production_process_supervisors (
+      process_id INTEGER NOT NULL REFERENCES production_processes(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (process_id, user_id)
+    );
+
     CREATE TABLE IF NOT EXISTS production_quality_checks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       check_no TEXT NOT NULL UNIQUE,
@@ -975,27 +1066,38 @@ export function initializeDatabase() {
     const insertDepartment = db.prepare(
       "INSERT INTO departments (name, code, description) VALUES (?, ?, ?)"
     );
-    insertDepartment.run("生产部", "PRODUCTION", "负责生产计划、工序执行与现场管理");
-    insertDepartment.run("质量部", "QUALITY", "负责测试、质检、不良与放行");
-    insertDepartment.run("仓储部", "WAREHOUSE", "负责原料、半成品、成品与委外收发");
-    insertDepartment.run("工程部", "ENGINEERING", "负责 BOM、工艺路线和测试规范");
-    insertDepartment.run("系统管理部", "IT", "负责账号、角色和系统运行维护");
+    insertDepartment.run("生产工序部", "PRODUCTION", "负责生产计划、工序执行与现场管理");
+    insertDepartment.run("质量工序部", "QUALITY", "负责测试、质检、不良与放行");
+    insertDepartment.run("仓储工序部", "WAREHOUSE", "负责原料、半成品、成品与委外收发");
+    insertDepartment.run("工程工序部", "ENGINEERING", "负责 BOM、工艺路线和测试规范");
+    insertDepartment.run("系统管理工序部", "IT", "负责账号、角色和系统运行维护");
   }
 
-  const roles = [
-    ["系统管理员", "SYSTEM_ADMIN", "管理系统账号、角色、权限和基础配置"],
-    ["生产主管", "PRODUCTION_MANAGER", "负责生产计划、派工和异常审批"],
-    ["仓库员", "WAREHOUSE_OPERATOR", "负责仓库与委外物料收发"],
-    ["质检员", "QUALITY_INSPECTOR", "负责测试、质检、隔离和放行"],
-    ["工序操作员", "OPERATOR", "负责本人授权工位的人工报工"],
-    ["部门经理", "DEPARTMENT_MANAGER", "负责获授权部门的业务管理与库存审批"]
-  ];
-  const insertRole = db.prepare(
-    "INSERT OR IGNORE INTO roles (name, code, description) VALUES (?, ?, ?)"
+  db.prepare("UPDATE departments SET name = ?, description = ? WHERE code = ?").run(
+    "生产工序部",
+    "负责生产计划、工序执行与现场管理",
+    "PRODUCTION"
   );
-  for (const role of roles) {
-    insertRole.run(...role);
-  }
+  db.prepare("UPDATE departments SET name = ?, description = ? WHERE code = ?").run(
+    "质量工序部",
+    "负责测试、质检、不良与放行",
+    "QUALITY"
+  );
+  db.prepare("UPDATE departments SET name = ?, description = ? WHERE code = ?").run(
+    "仓储工序部",
+    "负责原料、半成品、成品与委外收发",
+    "WAREHOUSE"
+  );
+  db.prepare("UPDATE departments SET name = ?, description = ? WHERE code = ?").run(
+    "工程工序部",
+    "负责 BOM、工艺路线和测试规范",
+    "ENGINEERING"
+  );
+  db.prepare("UPDATE departments SET name = ?, description = ? WHERE code = ?").run(
+    "系统管理工序部",
+    "负责账号、角色和系统运行维护",
+    "IT"
+  );
 
   const processBootstrapFlag = db
     .prepare("SELECT flag_key FROM system_bootstrap_flags WHERE flag_key = ?")
@@ -1006,10 +1108,6 @@ export function initializeDatabase() {
         `INSERT OR IGNORE INTO production_processes
          (code, name, process_type, sort_order, description)
          VALUES (?, ?, ?, ?, ?)`
-      );
-      const insertRoleAuthorization = db.prepare(
-        `INSERT OR IGNORE INTO production_process_role_authorizations (process_id, role_id)
-         VALUES (?, ?)`
       );
       for (const process of builtinProductionProcesses) {
         insertProcess.run(
@@ -1023,12 +1121,6 @@ export function initializeDatabase() {
           .prepare("SELECT id FROM production_processes WHERE code = ?")
           .get(process.code) as { id: number } | undefined;
         if (!row) continue;
-        for (const roleCode of process.roleCodes) {
-          const role = db
-            .prepare("SELECT id FROM roles WHERE code = ? AND status = 'active'")
-            .get(roleCode) as { id: number } | undefined;
-          if (role) insertRoleAuthorization.run(row.id, role.id);
-        }
       }
       db
         .prepare("INSERT INTO system_bootstrap_flags (flag_key) VALUES (?)")
@@ -1049,10 +1141,6 @@ export function initializeDatabase() {
          (code, name, process_type, sort_order, description)
          VALUES (?, ?, ?, ?, ?)`
       );
-      const insertRoleAuthorization = db.prepare(
-        `INSERT OR IGNORE INTO production_process_role_authorizations (process_id, role_id)
-         VALUES (?, ?)`
-      );
       for (const process of builtinProductionProcesses.filter((item) => ["PROC-DISASSEMBLY", "PROC-ASSEMBLY"].includes(item.code))) {
         insertProcess.run(
           process.code,
@@ -1065,12 +1153,6 @@ export function initializeDatabase() {
           .prepare("SELECT id FROM production_processes WHERE code = ?")
           .get(process.code) as { id: number } | undefined;
         if (!row) continue;
-        for (const roleCode of process.roleCodes) {
-          const role = db
-            .prepare("SELECT id FROM roles WHERE code = ? AND status = 'active'")
-            .get(roleCode) as { id: number } | undefined;
-          if (role) insertRoleAuthorization.run(row.id, role.id);
-        }
       }
       db
         .prepare("INSERT INTO system_bootstrap_flags (flag_key) VALUES (?)")
@@ -1256,122 +1338,32 @@ export function initializeDatabase() {
     .all() as Array<{ id: number; code: string }>;
   const permissionIdByCode = new Map(permissionIds.map((item) => [item.code, item.id]));
 
-  const rolePermissionMap: Record<string, string[]> = {
-    SYSTEM_ADMIN: permissionIds.map((item) => item.code),
-    PRODUCTION_MANAGER: [
-      "system.dashboard.view",
-      "system.users.view",
-      "system.roles.view",
-      "system.departments.view",
-      "production.dashboard.view",
-      "production.processes.view",
-      "production.processes.manage",
-      "production.routes.view",
-      "production.routes.manage",
-      "production.workorders.view",
-      "production.workorders.manage",
-      "production.workorders.control",
-      "production.workorders.delete",
-      "production.tasks.view",
-      "production.tasks.manage",
-      "production.reports.view",
-      "production.operations.execute",
-      "production.repairs.view",
-      "production.repairs.manage",
-      "production.scrap-products.view",
-      "warehouse.inventory.view",
-      "quality.inspection.view",
-      "quality.inspection.manage",
-      "report.view"
-    ],
-    QUALITY_INSPECTOR: [
-      "system.dashboard.view",
-      "system.departments.view",
-      "quality.inspection.view",
-      "quality.inspection.manage",
-      "production.workorders.view",
-      "production.tasks.view",
-      "production.reports.view",
-      "production.operations.execute",
-      "production.repairs.view",
-      "production.repairs.manage",
-      "production.scrap-products.view",
-      "report.view"
-    ],
-    OPERATOR: [
-      "system.dashboard.view",
-      "production.workorders.view",
-      "production.tasks.view",
-      "production.operations.execute"
-    ],
-    DEPARTMENT_MANAGER: [
-      "system.dashboard.view",
-      "system.departments.view",
-      "production.dashboard.view",
-      "production.processes.view",
-      "production.routes.view",
-      "production.workorders.view",
-      "production.workorders.manage",
-      "production.workorders.control",
-      "production.workorders.delete",
-      "production.tasks.view",
-      "production.tasks.manage",
-      "production.reports.view",
-      "production.operations.execute",
-      "production.repairs.view",
-      "production.repairs.manage",
-      "production.scrap-products.view",
-      "inventory.dashboard.view",
-      "inventory.categories.view",
-      "inventory.units.view",
-      "inventory.attributes.view",
-      "inventory.items.view",
-      "inventory.warehouses.view",
-      "inventory.documents.view",
-      "inventory.receipts.create",
-      "inventory.receipts.approve",
-      "inventory.receipts.post",
-      "inventory.issues.create",
-      "inventory.issues.approve",
-      "inventory.issues.post",
-      "inventory.transfers.create",
-      "inventory.transfers.approve",
-      "inventory.transfers.post",
-      "inventory.counts.create",
-      "inventory.counts.approve",
-      "inventory.counts.post",
-      "inventory.scrap.create",
-      "inventory.scrap.approve",
-      "inventory.scrap.post",
-      "inventory.balance.view",
-      "inventory.ledger.view"
-    ],
-    WAREHOUSE_OPERATOR: [
-      "system.dashboard.view",
-      "system.departments.view",
-      "inventory.dashboard.view",
-      "inventory.categories.view",
-      "inventory.units.view",
-      "inventory.attributes.view",
-      "inventory.items.view",
-      "inventory.warehouses.view",
-      "inventory.documents.view",
-      "inventory.receipts.create",
-      "inventory.issues.create",
-      "inventory.transfers.create",
-      "inventory.counts.create",
-      "inventory.scrap.create",
-      "inventory.receipts.post",
-      "inventory.issues.post",
-      "inventory.transfers.post",
-      "inventory.counts.post",
-      "inventory.scrap.post",
-      "inventory.balance.view",
-      "inventory.ledger.view",
-      "warehouse.inventory.view",
-      "warehouse.inventory.manage"
-    ]
-  };
+  db.prepare("UPDATE permissions SET module = ?, label = ? WHERE code = ?").run(
+    "工序",
+    "查看工序部门与岗位",
+    "system.departments.view"
+  );
+  db.prepare("UPDATE permissions SET module = ?, label = ? WHERE code = ?").run(
+    "工序",
+    "新增、编辑工序部门",
+    "system.departments.manage"
+  );
+
+  const ensureSpecialRoles = db.transaction(() => {
+    const insertRole = db.prepare("INSERT OR IGNORE INTO roles (name, code, description) VALUES (?, ?, ?)");
+    insertRole.run("系统管理员", "SYSTEM_ADMIN", "管理系统账号、角色、权限和基础配置");
+  });
+  ensureSpecialRoles();
+  syncProcessRoleTemplates();
+  db.prepare("DELETE FROM roles WHERE code IN (?, ?, ?, ?, ?, ?)").run(
+    "PRODUCTION_MANAGER",
+    "WAREHOUSE_OPERATOR",
+    "QUALITY_INSPECTOR",
+    "OPERATOR",
+    "PROCESS_MANAGER",
+    "DEPARTMENT_MANAGER"
+  );
+
   const roleRows = db.prepare("SELECT id, code FROM roles").all() as Array<{
     id: number;
     code: string;
@@ -1379,25 +1371,6 @@ export function initializeDatabase() {
   const insertRolePermission = db.prepare(
     "INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)"
   );
-  const rolePermissionsBootstrapFlag = db
-    .prepare("SELECT flag_key FROM system_bootstrap_flags WHERE flag_key = ?")
-    .get("builtin-role-permissions") as { flag_key: string } | undefined;
-  const rolePermissionCount = (
-    db.prepare("SELECT COUNT(*) AS count FROM role_permissions").get() as { count: number }
-  ).count;
-  // Role templates are initial data, not a recurring synchronization job.
-  if (!rolePermissionsBootstrapFlag) {
-    if (rolePermissionCount === 0) {
-      for (const role of roleRows) {
-        for (const code of rolePermissionMap[role.code] ?? []) {
-          const permissionId = permissionIdByCode.get(code);
-          if (permissionId) insertRolePermission.run(role.id, permissionId);
-        }
-      }
-    }
-    db.prepare("INSERT INTO system_bootstrap_flags (flag_key) VALUES (?)").run("builtin-role-permissions");
-  }
-  // New catalog entries must always be available to the break-glass administrator.
   const systemAdminRole = roleRows.find((role) => role.code === "SYSTEM_ADMIN");
   if (systemAdminRole) {
     for (const permission of permissionIds) insertRolePermission.run(systemAdminRole.id, permission.id);
@@ -1433,39 +1406,6 @@ export function initializeDatabase() {
       }
     }
     db.prepare("INSERT INTO system_bootstrap_flags (flag_key) VALUES (?)").run("permission-dependency-closure-v2");
-  }
-
-  const scrapProductsPermissionMigration = db
-    .prepare("SELECT flag_key FROM system_bootstrap_flags WHERE flag_key = ?")
-    .get("permission-production-scrap-products-view") as { flag_key: string } | undefined;
-  if (!scrapProductsPermissionMigration) {
-    const permissionId = permissionIdByCode.get("production.scrap-products.view");
-    if (permissionId) {
-      for (const role of roleRows.filter((role) => ["PRODUCTION_MANAGER", "QUALITY_INSPECTOR", "DEPARTMENT_MANAGER"].includes(role.code))) {
-        insertRolePermission.run(role.id, permissionId);
-      }
-    }
-    db.prepare("INSERT INTO system_bootstrap_flags (flag_key) VALUES (?)").run("permission-production-scrap-products-view");
-  }
-
-  const inventoryPostPermissionMigration = db
-    .prepare("SELECT flag_key FROM system_bootstrap_flags WHERE flag_key = ?")
-    .get("permission-inventory-document-post") as { flag_key: string } | undefined;
-  if (!inventoryPostPermissionMigration) {
-    const postPermissionCodes = [
-      "inventory.receipts.post",
-      "inventory.issues.post",
-      "inventory.transfers.post",
-      "inventory.counts.post",
-      "inventory.scrap.post"
-    ];
-    for (const role of roleRows.filter((role) => ["WAREHOUSE_OPERATOR", "DEPARTMENT_MANAGER"].includes(role.code))) {
-      for (const code of postPermissionCodes) {
-        const permissionId = permissionIdByCode.get(code);
-        if (permissionId) insertRolePermission.run(role.id, permissionId);
-      }
-    }
-    db.prepare("INSERT INTO system_bootstrap_flags (flag_key) VALUES (?)").run("permission-inventory-document-post");
   }
 
   const admin = db
@@ -1562,6 +1502,10 @@ export function getUserAuthorizedProcessCodes(userId: number): string[] {
                WHERE pua.process_id = p.id AND pua.user_id = ?
              )
              OR EXISTS (
+               SELECT 1 FROM production_process_supervisors pps
+               WHERE pps.process_id = p.id AND pps.user_id = ?
+             )
+             OR EXISTS (
                SELECT 1
                FROM production_process_role_authorizations pra
                INNER JOIN user_roles ur ON ur.role_id = pra.role_id
@@ -1571,7 +1515,7 @@ export function getUserAuthorizedProcessCodes(userId: number): string[] {
            )
          ORDER BY p.sort_order, p.id`
       )
-      .all(userId, userId) as Array<{ code: string }>
+      .all(userId, userId, userId) as Array<{ code: string }>
   ).map((process) => process.code);
 }
 

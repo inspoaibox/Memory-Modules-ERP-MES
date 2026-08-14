@@ -52,6 +52,10 @@ export type Role = {
   status: "active" | "inactive";
   userCount: number;
   permissionCount: number;
+  processId?: number | null;
+  processCode?: string | null;
+  processName?: string | null;
+  roleKind?: "system" | "manager" | "operator";
 };
 
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {

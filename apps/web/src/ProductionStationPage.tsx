@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, ClipboardCheck, Download, Eye, FilePlus2, Play, Printer, RefreshCw, Search, ShieldAlert, X } from "lucide-react";
-import { Department, User, request } from "./api";
+import { User, request } from "./api";
 import { downloadProductionTask, printProductionTask, ProductionTaskDetail, ProductionTaskDetailModal } from "./ProductionPage";
 import { DisassemblyReportModal } from "./DisassemblyReportModal";
 import { AssemblyReportModal } from "./AssemblyReportModal";
@@ -55,7 +55,6 @@ type ProductionTask = {
   processName: string;
   processType: ProcessType;
   sequenceNo: number;
-  assignedDepartmentName: string | null;
   assignedUserId: number | null;
   assignedUserName: string | null;
   plannedQuantity: number;
@@ -317,7 +316,7 @@ function StationTasksPanel({ currentUser, station }: { currentUser: User; statio
         {filtered.map((item) => {
           const canExecuteTask = isSystemAdmin(currentUser) || item.assignedUserId === currentUser.id;
           const executionAvailable = item.executionStatus === "normal";
-          return <tr key={item.id}><td><strong>{item.taskNo}</strong><small>P{String(item.workOrderItemLineNo).padStart(2, "0")} · 第 {item.sequenceNo} 道 · {item.processName}</small></td><td><strong>{item.workOrderNo}</strong><small>{item.productItemName} · {item.productItemCode}</small></td><td><strong>{item.assignedUserName || "未派工"}</strong><small>{item.assignedDepartmentName || "-"}</small></td><td><strong>{formatQuantity(item.plannedQuantity)}</strong><small>已投入 {formatQuantity(item.inputQuantity)}</small></td><td><strong>{formatQuantity(item.goodQuantity)}</strong><small className="muted-cell">已流转 {formatQuantity(item.outputQuantity)}</small><small className={item.defectQuantity > 0 ? "quantity-negative" : "muted-cell"}>不良 {formatQuantity(item.defectQuantity)}</small></td><td><div className="work-order-status-stack">{item.flowStatus === "awaiting_quality" ? <span className="production-status ready">待质检</span> : item.flowStatus === "awaiting_inventory" ? <span className="production-status ready">待入库</span> : <TaskStatusBadge status={item.status} />}<WorkOrderExecutionBadge status={item.executionStatus} terminationType={item.terminationType} /></div>{item.outputDocumentNo && <small className="code-cell">{item.outputDocumentNo}</small>}</td><td className="action-cell document-output-cell"><StationTaskOutputActions onPreview={() => void openDetail(item.id)} onPrint={() => void printTask(item.id)} onDownload={() => void downloadTask(item.id)} /></td><td className="action-cell"><div className="table-actions">{executionAvailable && canExecute && canExecuteTask && item.status === "ready" && item.flowStatus === "active" && <button className="table-action" onClick={() => void startTask(item)}><Play size={14} />开工</button>}{executionAvailable && canExecute && canExecuteTask && item.status === "in_progress" && item.flowStatus === "active" && <button className="table-action" onClick={() => setReporting(item)}>报工</button>}</div></td></tr>;
+          return <tr key={item.id}><td><strong>{item.taskNo}</strong><small>P{String(item.workOrderItemLineNo).padStart(2, "0")} · 第 {item.sequenceNo} 道 · {item.processName}</small></td><td><strong>{item.workOrderNo}</strong><small>{item.productItemName} · {item.productItemCode}</small></td><td><strong>{item.assignedUserName || "未派工"}</strong></td><td><strong>{formatQuantity(item.plannedQuantity)}</strong><small>已投入 {formatQuantity(item.inputQuantity)}</small></td><td><strong>{formatQuantity(item.goodQuantity)}</strong><small className="muted-cell">已流转 {formatQuantity(item.outputQuantity)}</small><small className={item.defectQuantity > 0 ? "quantity-negative" : "muted-cell"}>不良 {formatQuantity(item.defectQuantity)}</small></td><td><div className="work-order-status-stack">{item.flowStatus === "awaiting_quality" ? <span className="production-status ready">待质检</span> : item.flowStatus === "awaiting_inventory" ? <span className="production-status ready">待入库</span> : <TaskStatusBadge status={item.status} />}<WorkOrderExecutionBadge status={item.executionStatus} terminationType={item.terminationType} /></div>{item.outputDocumentNo && <small className="code-cell">{item.outputDocumentNo}</small>}</td><td className="action-cell document-output-cell"><StationTaskOutputActions onPreview={() => void openDetail(item.id)} onPrint={() => void printTask(item.id)} onDownload={() => void downloadTask(item.id)} /></td><td className="action-cell"><div className="table-actions">{executionAvailable && canExecute && canExecuteTask && item.status === "ready" && item.flowStatus === "active" && <button className="table-action" onClick={() => void startTask(item)}><Play size={14} />开工</button>}{executionAvailable && canExecute && canExecuteTask && item.status === "in_progress" && item.flowStatus === "active" && <button className="table-action" onClick={() => setReporting(item)}>报工</button>}</div></td></tr>;
         })}
         {!filtered.length && <EmptyTable colSpan={8} title="暂无本工位任务" description="本工位暂无已派发任务，或当前账号无可查看的数据范围。" />}
       </tbody></table></div>
@@ -335,14 +334,12 @@ function StationTasksPanel({ currentUser, station }: { currentUser: User; statio
 function StationWorkOrderForm({ station, onClose, onSaved }: { station: StationDefinition; onClose: () => void; onSaved: () => void }) {
   const [products, setProducts] = useState<ProductItem[]>([]);
   const [routes, setRoutes] = useState<ProductionRoute[]>([]);
-  const [departments, setDepartments] = useState<Department[]>([]);
   const [operators, setOperators] = useState<Operator[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<WorkOrderEntryForm>({
     lines: [{ productItemId: "", routeId: "", plannedQuantity: "", remark: "" }],
-    departmentId: "",
     managerUserId: "",
     priority: "normal",
     plannedStartDate: today(),
@@ -355,14 +352,12 @@ function StationWorkOrderForm({ station, onClose, onSaved }: { station: StationD
     void Promise.all([
       request<{ items: ProductItem[] }>("/inventory/items"),
       request<{ items: ProductionRoute[] }>(`/production/routes?processCode=${encodeURIComponent(station.processCode)}`),
-      request<{ items: Department[] }>("/departments"),
-      request<{ items: Operator[] }>("/production/operators")
+      request<{ items: Operator[] }>(`/production/operators?processCode=${encodeURIComponent(station.processCode)}`)
     ])
-      .then(([productResult, routeResult, departmentResult, operatorResult]) => {
+      .then(([productResult, routeResult, operatorResult]) => {
         if (!active) return;
         setProducts(productResult.items.filter((item) => item.status === "active"));
         setRoutes(routeResult.items.filter((route) => route.status === "active"));
-        setDepartments(departmentResult.items.filter((department) => department.status === "active"));
         setOperators(operatorResult.items);
       })
       .catch((loadError) => {
@@ -387,7 +382,6 @@ function StationWorkOrderForm({ station, onClose, onSaved }: { station: StationD
             plannedQuantity: Number(line.plannedQuantity),
             remark: line.remark
           })),
-          departmentId: Number(form.departmentId),
           managerUserId: form.managerUserId ? Number(form.managerUserId) : null,
           priority: form.priority as WorkOrderPriority,
           plannedStartDate: form.plannedStartDate,
@@ -408,12 +402,11 @@ function StationWorkOrderForm({ station, onClose, onSaved }: { station: StationD
       <form className="modal-form" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
         <div className="form-note">从当前工序直接发起并下达。系统只接受包含“{station.title}”的工艺路线，并从当前工序生成首个待开工任务，后续工序继续按该路线流转。</div>
         {loading
-          ? <div className="form-note">正在加载商品、路线与部门配置...</div>
+          ? <div className="form-note">正在加载商品、路线与工序员工...</div>
           : <ProductionWorkOrderEntryTable
               form={form}
               products={products}
               routes={routes}
-              departments={departments}
               operators={operators}
               priorities={[
                 { value: "low", label: "低" },
