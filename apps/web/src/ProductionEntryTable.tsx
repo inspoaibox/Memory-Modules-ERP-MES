@@ -119,7 +119,7 @@ export function ProductionWorkOrderEntryTable({
   form: WorkOrderEntryForm;
   products: Array<{ id: number; itemCode: string; name: string }>;
   routes: Array<{ id: number; code: string; name: string }>;
-  operators: Array<{ id: number; displayName: string; position: string; departmentName: string | null }>;
+  operators: Array<{ id: number; displayName: string; position: string; processName?: string | null }>;
   priorities: Array<{ value: string; label: string }>;
   onChange: (form: WorkOrderEntryForm) => void;
 }) {
@@ -160,7 +160,7 @@ export function ProductionWorkOrderEntryTable({
         </table>
       </div>
       <div className="form-grid work-order-common-fields">
-        <label>工单负责人<select value={form.managerUserId} onChange={(event) => update("managerUserId", event.target.value)}><option value="">暂不指定</option>{operators.map((operator) => <option value={operator.id} key={operator.id}>{operator.displayName} · {operator.position || "员工"}</option>)}</select></label>
+        <label>工单负责人<select value={form.managerUserId} onChange={(event) => update("managerUserId", event.target.value)}><option value="">暂不指定</option>{operators.map((operator) => <option value={operator.id} key={operator.id}>{operator.displayName} · {operator.processName || "未分配工序"} · {operator.position || "员工"}</option>)}</select></label>
         <label>优先级<select value={form.priority} onChange={(event) => update("priority", event.target.value)}>{priorities.map((priority) => <option value={priority.value} key={priority.value}>{priority.label}</option>)}</select></label>
         <label>计划开始<input type="date" value={form.plannedStartDate} onChange={(event) => update("plannedStartDate", event.target.value)} /></label>
         <label>计划结束<input type="date" value={form.plannedEndDate} onChange={(event) => update("plannedEndDate", event.target.value)} /></label>

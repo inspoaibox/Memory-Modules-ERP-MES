@@ -36,7 +36,6 @@ import {
   X
 } from "lucide-react";
 import {
-  Department,
   Permission,
   Role,
   User,
@@ -122,6 +121,14 @@ type NavItem = {
   group: string;
   section?: NavSection;
   processCode?: string;
+};
+
+type ProcessOption = {
+  id: number;
+  code: string;
+  name: string;
+  processType: string;
+  status: "active" | "inactive";
 };
 
 const pageLabels: Record<Page, string> = {
@@ -588,19 +595,19 @@ function DashboardPage() {
 
 function UsersPage({ currentUser }: { currentUser: User }) {
   const [users, setUsers] = useState<UserListItem[]>([]);
-  const [departments, setDepartments] = useState<Department[]>([]);
+  const [processes, setProcesses] = useState<ProcessOption[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
   const [query, setQuery] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<UserListItem | null>(null);
   const load = async () => {
-    const [userResult, departmentResult, roleResult] = await Promise.all([
+    const [userResult, processResult, roleResult] = await Promise.all([
       request<{ items: UserListItem[] }>("/users"),
-      request<{ items: Department[] }>("/departments"),
+      request<{ items: ProcessOption[] }>("/production/processes"),
       request<{ items: Role[] }>("/roles")
     ]);
     setUsers(userResult.items);
-    setDepartments(departmentResult.items);
+    setProcesses(processResult.items);
     setRoles(roleResult.items);
   };
   useEffect(() => { load().catch(() => undefined); }, []);
@@ -613,31 +620,39 @@ function UsersPage({ currentUser }: { currentUser: User }) {
       <section className="panel">
         <div className="toolbar"><div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索姓名、账号、工号或岗位" /></div><button className="icon-button" onClick={() => load()} title="刷新列表" aria-label="刷新列表"><RefreshCw size={17} /></button></div>
         <div className="table-wrap"><table><thead><tr><th>员工</th><th>工号</th><th>工序流程 / 岗位</th><th>角色</th><th>状态</th><th>最近登录</th><th className="action-cell">操作</th></tr></thead><tbody>
-          {filtered.map((item) => <tr key={item.id}><td><div className="person-cell"><span className="avatar small">{item.displayName.slice(0, 1)}</span><div><strong>{item.displayName}</strong><small>@{item.username}</small></div></div></td><td className="muted-cell">{item.employeeNo}</td><td><strong>{item.departmentName || "未分配工序流程"}</strong><small>{item.position || "未设置岗位"}</small></td><td><div className="tag-list">{(item.roleNames || "未分配角色").split("、").map((role) => <span className="tag" key={role}>{role}</span>)}</div></td><td><span className={`status-badge ${item.status}`}>{item.status === "active" ? "启用" : "停用"}</span></td><td className="muted-cell">{item.lastLoginAt ? formatDate(item.lastLoginAt) : "尚未登录"}</td><td className="action-cell">{canManageUsers ? <button className="table-action" onClick={() => { setEditing(item); setShowForm(true); }}>编辑</button> : <span className="muted-cell">仅查看</span>}</td></tr>)}
+          {filtered.map((item) => <tr key={item.id}><td><div className="person-cell"><span className="avatar small">{item.displayName.slice(0, 1)}</span><div><strong>{item.displayName}</strong><small>@{item.username}</small></div></div></td><td className="muted-cell">{item.employeeNo}</td><td><strong>{item.processName || "未分配工序"}</strong><small>{item.position || "未设置岗位"}</small></td><td><div className="tag-list">{(item.roleNames || "未分配角色").split("、").map((role) => <span className="tag" key={role}>{role}</span>)}</div></td><td><span className={`status-badge ${item.status}`}>{item.status === "active" ? "启用" : "停用"}</span></td><td className="muted-cell">{item.lastLoginAt ? formatDate(item.lastLoginAt) : "尚未登录"}</td><td className="action-cell">{canManageUsers ? <button className="table-action" onClick={() => { setEditing(item); setShowForm(true); }}>编辑</button> : <span className="muted-cell">仅查看</span>}</td></tr>)}
           {!filtered.length && <tr><td colSpan={7}><EmptyState title="没有找到员工" description="调整搜索条件，或创建一个新的员工账号。" /></td></tr>}
         </tbody></table></div>
       </section>
-      {showForm && <UserForm user={editing} departments={departments} roles={roles} currentUser={currentUser} onClose={() => setShowForm(false)} onSaved={() => { setShowForm(false); load(); }} />}
+      {showForm && <UserForm user={editing} processes={processes} roles={roles} currentUser={currentUser} onClose={() => setShowForm(false)} onSaved={() => { setShowForm(false); load(); }} />}
     </div>
   );
 }
 
-function UserForm({ user, departments, roles, currentUser, onClose, onSaved }: { user: UserListItem | null; departments: Department[]; roles: Role[]; currentUser: User; onClose: () => void; onSaved: () => void }) {
-  const [form, setForm] = useState({ username: user?.username ?? "", password: "", displayName: user?.displayName ?? "", employeeNo: user?.employeeNo ?? "", position: user?.position ?? "", departmentId: user?.departmentId?.toString() ?? "", roleIds: user?.roleIds.split(",").filter(Boolean) ?? [], managedDepartmentIds: user?.managedDepartmentIds.split(",").filter(Boolean) ?? [], status: user?.status ?? "active" });
+function UserForm({ user, processes, roles, currentUser, onClose, onSaved }: { user: UserListItem | null; processes: ProcessOption[]; roles: Role[]; currentUser: User; onClose: () => void; onSaved: () => void }) {
+  const [form, setForm] = useState({ username: user?.username ?? "", password: "", displayName: user?.displayName ?? "", employeeNo: user?.employeeNo ?? "", position: user?.position ?? "", processId: user?.processId?.toString() ?? "", roleIds: user?.roleIds.split(",").filter(Boolean) ?? [], managedProcessIds: user?.managedProcessIds.split(",").filter(Boolean) ?? [], status: user?.status ?? "active" });
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const toggleRole = (id: string) => setForm((current) => ({ ...current, roleIds: current.roleIds.includes(id) ? current.roleIds.filter((roleId) => roleId !== id) : [...current.roleIds, id] }));
-  const toggleManagedDepartment = (id: string) => setForm((current) => ({ ...current, managedDepartmentIds: current.managedDepartmentIds.includes(id) ? current.managedDepartmentIds.filter((departmentId) => departmentId !== id) : [...current.managedDepartmentIds, id] }));
+  const toggleManagedProcess = (id: string) => setForm((current) => ({ ...current, managedProcessIds: current.managedProcessIds.includes(id) ? current.managedProcessIds.filter((processId) => processId !== id) : [...current.managedProcessIds, id] }));
+  const changeProcess = (processId: string) => {
+    const hiddenRoleIds = form.roleIds.filter((roleId) => !roles.some((role) => role.id.toString() === roleId));
+    setForm({ ...form, processId, roleIds: hiddenRoleIds, managedProcessIds: form.managedProcessIds.filter((id) => id !== form.processId) });
+  };
   const isSystemAdmin = currentUser.roles.some((role) => role.code === "SYSTEM_ADMIN");
+  const processRoles = form.processId ? roles.filter((role) => role.processId?.toString() === form.processId) : [];
+  const activeProcesses = processes.filter((process) => process.status === "active");
+  const selectedHasManagerRole = form.roleIds.some((roleId) => roles.find((role) => role.id.toString() === roleId)?.roleKind === "manager");
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setError("");
     setSaving(true);
     try {
+      const payload = { displayName: form.displayName, employeeNo: form.employeeNo, position: form.position, processId: form.processId ? Number(form.processId) : null, roleIds: form.roleIds.map(Number), managedProcessIds: selectedHasManagerRole ? form.managedProcessIds.map(Number) : [], status: form.status, password: form.password || undefined };
       if (user) {
-        await request(`/users/${user.id}`, { method: "PUT", body: JSON.stringify({ displayName: form.displayName, employeeNo: form.employeeNo, position: form.position, departmentId: form.departmentId ? Number(form.departmentId) : null, roleIds: form.roleIds.map(Number), managedDepartmentIds: form.managedDepartmentIds.map(Number), status: form.status, password: form.password || undefined }) });
+        await request(`/users/${user.id}`, { method: "PUT", body: JSON.stringify(payload) });
       } else {
-        await request("/users", { method: "POST", body: JSON.stringify({ ...form, departmentId: form.departmentId ? Number(form.departmentId) : null, roleIds: form.roleIds.map(Number), managedDepartmentIds: form.managedDepartmentIds.map(Number) }) });
+        await request("/users", { method: "POST", body: JSON.stringify({ ...payload, username: form.username, password: form.password }) });
       }
       onSaved();
     } catch (saveError) {
@@ -647,9 +662,9 @@ function UserForm({ user, departments, roles, currentUser, onClose, onSaved }: {
     }
   };
   return <Modal title={user ? "编辑员工账号" : "新建员工账号"} onClose={onClose}><form className="modal-form" onSubmit={submit}>
-    <div className="form-grid"><label>登录账号<input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} disabled={Boolean(user)} /></label><label>员工姓名<input value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} /></label><label>工号<input value={form.employeeNo} onChange={(event) => setForm({ ...form, employeeNo: event.target.value })} /></label><label>岗位<input value={form.position} onChange={(event) => setForm({ ...form, position: event.target.value })} placeholder="例如：工序员工" /></label><label>所属工序流程<select value={form.departmentId} onChange={(event) => setForm({ ...form, departmentId: event.target.value })}><option value="">未分配工序流程</option>{departments.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label>账号状态<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value as "active" | "inactive" })}><option value="active">启用</option><option value="inactive">停用</option></select></label><label className="full-span">{user ? "重置密码（留空则不修改）" : "初始密码"}<input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label></div>
-    <div className="role-picker"><div className="field-label">工序角色</div><div className="role-options">{roles.map((role) => <button type="button" className={`role-option ${form.roleIds.includes(role.id.toString()) ? "selected" : ""}`} key={role.id} onClick={() => toggleRole(role.id.toString())}><span>{form.roleIds.includes(role.id.toString()) ? <Check size={14} /> : <span className="empty-check" />}</span>{role.name}</button>)}</div></div>
-    {isSystemAdmin && <div className="role-picker"><div className="field-label">主管工序范围</div><div className="role-options">{departments.filter((department) => department.status === "active").map((department) => <button type="button" className={`role-option ${form.managedDepartmentIds.includes(department.id.toString()) ? "selected" : ""}`} key={department.id} onClick={() => toggleManagedDepartment(department.id.toString())}><span>{form.managedDepartmentIds.includes(department.id.toString()) ? <Check size={14} /> : <span className="empty-check" />}</span>{department.name}</button>)}</div></div>}
+    <div className="form-grid"><label>登录账号<input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} disabled={Boolean(user)} /></label><label>员工姓名<input value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} /></label><label>工号<input value={form.employeeNo} onChange={(event) => setForm({ ...form, employeeNo: event.target.value })} /></label><label>岗位<input value={form.position} onChange={(event) => setForm({ ...form, position: event.target.value })} placeholder="例如：芯片初测员工" /></label><label>所属工序<select value={form.processId} onChange={(event) => changeProcess(event.target.value)}><option value="">请选择所属工序</option>{activeProcesses.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label>账号状态<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value as "active" | "inactive" })}><option value="active">启用</option><option value="inactive">停用</option></select></label><label className="full-span">{user ? "重置密码（留空则不修改）" : "初始密码"}<input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label></div>
+    <div className="role-picker"><div className="field-label">工序职位</div><div className="role-options">{processRoles.map((role) => <button type="button" className={`role-option ${form.roleIds.includes(role.id.toString()) ? "selected" : ""}`} key={role.id} onClick={() => toggleRole(role.id.toString())}><span>{form.roleIds.includes(role.id.toString()) ? <Check size={14} /> : <span className="empty-check" />}</span>{role.roleKind === "manager" ? "主管" : "员工"} · {role.name}</button>)}</div>{!form.processId && <div className="form-note">先选择所属工序后，再分配主管或员工职位。</div>}</div>
+    {isSystemAdmin && selectedHasManagerRole && <div className="role-picker"><div className="field-label">主管工序范围</div><div className="role-options">{activeProcesses.map((process) => <button type="button" className={`role-option ${form.managedProcessIds.includes(process.id.toString()) ? "selected" : ""}`} key={process.id} onClick={() => toggleManagedProcess(process.id.toString())}><span>{form.managedProcessIds.includes(process.id.toString()) ? <Check size={14} /> : <span className="empty-check" />}</span>{process.name}</button>)}</div></div>}
     {currentUser.id === user?.id && <div className="form-note">当前正在编辑自己的账号，停用后将立即退出系统。</div>}
     {error && <div className="form-error">{error}</div>}
     <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving}>{saving ? "保存中..." : "保存账号"} <Check size={16} /></button></div>

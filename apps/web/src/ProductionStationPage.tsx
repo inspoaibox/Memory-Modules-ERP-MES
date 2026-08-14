@@ -113,8 +113,8 @@ type Operator = {
   displayName: string;
   employeeNo: string;
   position: string;
-  departmentId: number | null;
-  departmentName: string | null;
+  processId: number | null;
+  processName: string | null;
 };
 
 const stations: Record<ProductionStationKey, StationDefinition> = {

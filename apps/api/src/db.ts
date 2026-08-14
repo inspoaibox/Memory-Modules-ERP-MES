@@ -327,6 +327,7 @@ export function initializeDatabase() {
       display_name TEXT NOT NULL,
       employee_no TEXT NOT NULL UNIQUE,
       position TEXT NOT NULL DEFAULT '',
+      process_id INTEGER REFERENCES production_processes(id) ON DELETE SET NULL,
       department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
       status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
       token_version INTEGER NOT NULL DEFAULT 0,
@@ -808,6 +809,9 @@ export function initializeDatabase() {
   }
   if (!userColumns.some((column) => column.name === "must_change_password")) {
     db.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!userColumns.some((column) => column.name === "process_id")) {
+    db.exec("ALTER TABLE users ADD COLUMN process_id INTEGER REFERENCES production_processes(id) ON DELETE SET NULL");
   }
   const routeStepColumns = db.prepare("PRAGMA table_info(production_route_steps)").all() as Array<{ name: string }>;
   if (!routeStepColumns.some((column) => column.name === "default_department_id")) {

@@ -76,8 +76,8 @@ type Operator = {
   displayName: string;
   employeeNo: string;
   position: string;
-  departmentId: number | null;
-  departmentName: string | null;
+  processId: number | null;
+  processName: string | null;
 };
 
 type AuthorizationRole = { id: number; name: string; code: string };

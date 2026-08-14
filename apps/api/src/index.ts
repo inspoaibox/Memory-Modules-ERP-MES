@@ -85,9 +85,9 @@ function getUserProfile(userId: number) {
         SELECT u.id, u.username, u.display_name AS displayName, u.employee_no AS employeeNo,
                u.position, u.status, u.last_login_at AS lastLoginAt,
                u.must_change_password AS mustChangePassword,
-               d.id AS departmentId, d.name AS departmentName
+               p.id AS processId, p.name AS processName
         FROM users u
-        LEFT JOIN departments d ON d.id = u.department_id
+        LEFT JOIN production_processes p ON p.id = u.process_id
         WHERE u.id = ?
       `
     )
@@ -104,21 +104,21 @@ function getUserProfile(userId: number) {
       `
     )
     .all(userId);
-  const managedDepartments = db
+  const managedProcesses = db
     .prepare(
       `
-        SELECT d.id, d.name, d.code
-        FROM departments d
-        INNER JOIN department_managers dm ON dm.department_id = d.id
-        WHERE dm.user_id = ? AND d.status = 'active'
-        ORDER BY d.id
+        SELECT p.id, p.name, p.code
+        FROM production_processes p
+        INNER JOIN production_process_supervisors pps ON pps.process_id = p.id
+        WHERE pps.user_id = ? AND p.status = 'active'
+        ORDER BY p.sort_order, p.id
       `
     )
     .all(userId);
   return {
     ...user,
     roles,
-    managedDepartments,
+    managedProcesses,
     permissions: getUserPermissions(userId),
     authorizedProcessCodes: getUserAuthorizedProcessCodes(userId)
   };
@@ -132,30 +132,60 @@ function ensurePassword(password: string) {
   if (password.length < 10) throw app.httpErrors.badRequest("密码至少需要 10 位");
 }
 
-function ensureActiveDepartment(departmentId: number | null | undefined, label = "所属工序部门") {
-  if (departmentId == null) return null;
-  const department = db
-    .prepare("SELECT id FROM departments WHERE id = ? AND status = 'active'")
-    .get(departmentId) as { id: number } | undefined;
-  if (!department) throw app.httpErrors.badRequest(`${label}不存在或已停用`);
-  return department.id;
+function ensureActiveProcess(processId: number | null | undefined, label = "所属工序") {
+  if (processId == null) throw app.httpErrors.badRequest(`${label}不能为空`);
+  const process = db
+    .prepare("SELECT id, code, name FROM production_processes WHERE id = ? AND status = 'active'")
+    .get(processId) as { id: number; code: string; name: string } | undefined;
+  if (!process) throw app.httpErrors.badRequest(`${label}不存在或已停用`);
+  return process;
 }
 
-function ensureActiveRoleIds(roleIds: number[], required = true) {
+function ensureManagedProcessIds(processIds: number[]) {
+  const ids = [...new Set(processIds.map(Number))].filter((id) => Number.isInteger(id) && id > 0);
+  for (const id of ids) ensureActiveProcess(id, "主管工序范围");
+  return ids;
+}
+
+function ensureProcessRoleIds(processId: number | null, roleIds: number[], required = true) {
   const ids = [...new Set(roleIds.map(Number))].filter((id) => Number.isInteger(id) && id > 0);
-  if (required && !ids.length) throw app.httpErrors.badRequest("员工必须至少分配一个启用角色");
-  if (!ids.length) return ids;
+  if (required && !ids.length) throw app.httpErrors.badRequest("员工必须至少分配一个工序职位");
+  if (!ids.length) return [] as Array<{ id: number; code: string; processId: number | null; roleKind: "system" | "manager" | "operator" }>;
   const rows = db
-    .prepare(`SELECT id FROM roles WHERE status = 'active' AND id IN (${ids.map(() => "?").join(",")})`)
-    .all(...ids) as Array<{ id: number }>;
-  if (rows.length !== ids.length) throw app.httpErrors.badRequest("角色不存在或已停用");
-  return ids;
+    .prepare(
+      `SELECT r.id, r.code, p.id AS processId,
+              CASE
+                WHEN r.code = 'SYSTEM_ADMIN' THEN 'system'
+                WHEN r.code = p.code || '-MANAGER' THEN 'manager'
+                WHEN r.code = p.code || '-OPERATOR' THEN 'operator'
+                ELSE 'operator'
+              END AS roleKind
+       FROM roles r
+       LEFT JOIN production_processes p
+              ON r.code IN (p.code || '-MANAGER', p.code || '-OPERATOR')
+       WHERE r.status = 'active' AND r.id IN (${ids.map(() => "?").join(",")})`
+    )
+    .all(...ids) as Array<{ id: number; code: string; processId: number | null; roleKind: "system" | "manager" | "operator" }>;
+  if (rows.length !== ids.length) throw app.httpErrors.badRequest("工序职位不存在或已停用");
+  for (const row of rows) {
+    if (row.roleKind === "system") continue;
+    if (!processId) throw app.httpErrors.badRequest("请选择所属工序后再分配工序职位");
+    if (row.processId !== processId) throw app.httpErrors.badRequest("工序职位必须属于所选工序");
+  }
+  return rows;
 }
 
-function ensureManagedDepartmentIds(departmentIds: number[]) {
-  const ids = [...new Set(departmentIds.map(Number))].filter((id) => Number.isInteger(id) && id > 0);
-  for (const id of ids) ensureActiveDepartment(id, "主管工序范围");
-  return ids;
+function syncUserProcessScope(userId: number, processId: number | null, roles: Array<{ processId: number | null; roleKind: "system" | "manager" | "operator" }>, managedProcessIds: number[]) {
+  db.prepare("DELETE FROM production_process_user_authorizations WHERE user_id = ?").run(userId);
+  db.prepare("DELETE FROM production_process_supervisors WHERE user_id = ?").run(userId);
+  const insertUserProcess = db.prepare("INSERT OR IGNORE INTO production_process_user_authorizations (process_id, user_id) VALUES (?, ?)");
+  const insertSupervisorProcess = db.prepare("INSERT OR IGNORE INTO production_process_supervisors (process_id, user_id) VALUES (?, ?)");
+  if (processId) insertUserProcess.run(processId, userId);
+  const supervisorProcessIds = new Set(managedProcessIds);
+  if (processId && roles.some((role) => role.processId === processId && role.roleKind === "manager")) {
+    supervisorProcessIds.add(processId);
+  }
+  for (const supervisorProcessId of supervisorProcessIds) insertSupervisorProcess.run(supervisorProcessId, userId);
 }
 
 function getSystemAdminRoleId() {
@@ -290,8 +320,8 @@ app.get("/api/dashboard", { preHandler: requirePermission("system.dashboard.view
   const roles = db.prepare("SELECT COUNT(*) AS count FROM roles WHERE status = 'active'").get() as {
     count: number;
   };
-  const departments = db
-    .prepare("SELECT COUNT(*) AS count FROM departments WHERE status = 'active'")
+  const processes = db
+    .prepare("SELECT COUNT(*) AS count FROM production_processes WHERE status = 'active'")
     .get() as { count: number };
   const audits = db
     .prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE date(created_at) = date('now')")
@@ -300,11 +330,11 @@ app.get("/api/dashboard", { preHandler: requirePermission("system.dashboard.view
     cards: [
       { key: "users", label: "启用员工", value: users.count, tone: "blue" },
       { key: "roles", label: "启用角色", value: roles.count, tone: "green" },
-      { key: "departments", label: "工序部门", value: departments.count, tone: "amber" },
+      { key: "processes", label: "启用工序", value: processes.count, tone: "amber" },
       { key: "audits", label: "今日审计事件", value: audits.count, tone: "red" }
     ],
     todo: [
-      { title: "账号与岗位权限初始化", status: "当前阶段", detail: "完善员工、工序部门、角色和权限数据" },
+      { title: "账号与岗位权限初始化", status: "当前阶段", detail: "完善员工、工序职位、角色和权限数据" },
       { title: "生产工序权限预留", status: "下一阶段", detail: "接入工单、工序任务和人工报工" },
       { title: "质量与仓储模块预留", status: "后续扩展", detail: "接入库存状态、测试、维修和放行" }
     ]
@@ -370,18 +400,18 @@ app.get("/api/users", { preHandler: requirePermission("system.users.view") }, as
         `
           SELECT u.id, u.username, u.display_name AS displayName, u.employee_no AS employeeNo,
                  u.position, u.status, u.last_login_at AS lastLoginAt,
-                 d.id AS departmentId, d.name AS departmentName,
+                 p.id AS processId, p.name AS processName,
                  COALESCE(GROUP_CONCAT(r.name, '、'), '') AS roleNames,
                  COALESCE(GROUP_CONCAT(r.code, ','), '') AS roleCodes,
                  COALESCE(GROUP_CONCAT(r.id, ','), '') AS roleIds,
                  COALESCE(
-                   (SELECT GROUP_CONCAT(dm.department_id, ',')
-                    FROM department_managers dm
-                    WHERE dm.user_id = u.id),
+                   (SELECT GROUP_CONCAT(pps.process_id, ',')
+                    FROM production_process_supervisors pps
+                    WHERE pps.user_id = u.id),
                    ''
-                 ) AS managedDepartmentIds
+                 ) AS managedProcessIds
           FROM users u
-          LEFT JOIN departments d ON d.id = u.department_id
+          LEFT JOIN production_processes p ON p.id = u.process_id
           LEFT JOIN user_roles ur ON ur.user_id = u.id
           LEFT JOIN roles r ON r.id = ur.role_id AND (r.code = 'SYSTEM_ADMIN' OR r.code LIKE 'PROC-%')
           GROUP BY u.id
@@ -399,24 +429,25 @@ app.post<{
     displayName?: string;
     employeeNo?: string;
     position?: string;
-                 departmentId?: number | null;
+    processId?: number | null;
     roleIds?: number[];
-    managedDepartmentIds?: number[];
+    managedProcessIds?: number[];
   };
 }>("/api/users", { preHandler: requirePermission("system.users.manage") }, async (request) => {
   ensureSystemAdmin(request.user.id);
-  const { username, password, displayName, employeeNo, position, departmentId, roleIds = [], managedDepartmentIds = [] } = request.body;
+  const { username, password, displayName, employeeNo, position, processId, roleIds = [], managedProcessIds = [] } = request.body;
   if (!username?.trim() || !password || !displayName?.trim() || !employeeNo?.trim()) {
     throw app.httpErrors.badRequest("账号、密码、姓名和工号不能为空");
   }
   ensurePassword(password);
-  const resolvedDepartmentId = ensureActiveDepartment(departmentId);
-  const resolvedRoleIds = ensureActiveRoleIds(roleIds);
-  const resolvedManagedDepartmentIds = ensureManagedDepartmentIds(managedDepartmentIds);
+  const resolvedProcess = ensureActiveProcess(processId);
+  const resolvedRoles = ensureProcessRoleIds(resolvedProcess.id, roleIds);
+  const resolvedRoleIds = resolvedRoles.map((role) => role.id);
+  const resolvedManagedProcessIds = ensureManagedProcessIds(managedProcessIds);
   const insert = db.transaction(() => {
     const result = db
       .prepare(
-        "INSERT INTO users (username, password_hash, display_name, employee_no, position, department_id, must_change_password) VALUES (?, ?, ?, ?, ?, ?, 1)"
+        "INSERT INTO users (username, password_hash, display_name, employee_no, position, process_id, must_change_password) VALUES (?, ?, ?, ?, ?, ?, 1)"
       )
       .run(
         username.trim(),
@@ -424,14 +455,11 @@ app.post<{
         displayName.trim(),
         employeeNo.trim(),
         position?.trim() ?? "",
-        resolvedDepartmentId
+        resolvedProcess.id
       );
     const insertRole = db.prepare("INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)");
     for (const roleId of resolvedRoleIds) insertRole.run(result.lastInsertRowid, roleId);
-    const insertManagerDepartment = db.prepare(
-      "INSERT OR IGNORE INTO department_managers (department_id, user_id) VALUES (?, ?)"
-    );
-    for (const managedDepartmentId of resolvedManagedDepartmentIds) insertManagerDepartment.run(managedDepartmentId, result.lastInsertRowid);
+    syncUserProcessScope(Number(result.lastInsertRowid), resolvedProcess.id, resolvedRoles, resolvedManagedProcessIds);
     return result.lastInsertRowid;
   });
   try {
@@ -449,25 +477,29 @@ app.put<{
     displayName?: string;
     employeeNo?: string;
     position?: string;
-    departmentId?: number | null;
+    processId?: number | null;
     status?: "active" | "inactive";
     password?: string;
     roleIds?: number[];
-    managedDepartmentIds?: number[];
+    managedProcessIds?: number[];
   };
 }>("/api/users/:id", { preHandler: requirePermission("system.users.manage") }, async (request) => {
   ensureSystemAdmin(request.user.id);
   const id = Number(request.params.id);
-  const existing = db.prepare("SELECT id, username, department_id AS departmentId, status FROM users WHERE id = ?").get(id) as
-    | { id: number; username: string; departmentId: number | null; status: "active" | "inactive" }
+  const existing = db.prepare("SELECT id, username, process_id AS processId, status FROM users WHERE id = ?").get(id) as
+    | { id: number; username: string; processId: number | null; status: "active" | "inactive" }
     | undefined;
   if (!existing) throw app.httpErrors.notFound("员工账号不存在");
 
-  const { displayName, employeeNo, position, departmentId, status, password, roleIds = [], managedDepartmentIds = [] } = request.body;
+  const { displayName, employeeNo, position, processId, status, password, roleIds = [], managedProcessIds = [] } = request.body;
   if (password) ensurePassword(password);
-  const nextDepartmentId = departmentId === undefined ? existing.departmentId : ensureActiveDepartment(departmentId);
-  const nextRoleIds = request.body.roleIds === undefined ? null : ensureActiveRoleIds(roleIds);
-  const nextManagedDepartmentIds = request.body.managedDepartmentIds === undefined ? null : ensureManagedDepartmentIds(managedDepartmentIds);
+  const nextProcess = processId === undefined
+    ? (existing.processId ? ensureActiveProcess(existing.processId) : null)
+    : (processId == null ? null : ensureActiveProcess(processId));
+  const nextProcessId = nextProcess?.id ?? null;
+  const nextRoles = request.body.roleIds === undefined ? null : ensureProcessRoleIds(nextProcessId, roleIds);
+  const nextRoleIds = nextRoles?.map((role) => role.id) ?? null;
+  const nextManagedProcessIds = request.body.managedProcessIds === undefined ? null : ensureManagedProcessIds(managedProcessIds);
   const systemAdminRoleId = getSystemAdminRoleId();
   const existingIsSystemAdmin = isSystemAdmin(id);
   if (
@@ -494,7 +526,7 @@ app.put<{
         SET display_name = COALESCE(?, display_name),
             employee_no = COALESCE(?, employee_no),
             position = COALESCE(?, position),
-             department_id = ?,
+             process_id = ?,
              status = COALESCE(?, status),
              password_hash = COALESCE(?, password_hash),
              token_version = token_version + 1,
@@ -506,24 +538,25 @@ app.put<{
       displayName?.trim() || null,
       employeeNo?.trim() || null,
       position?.trim() ?? null,
-       nextDepartmentId,
+       nextProcessId,
        status ?? null,
        password ? bcrypt.hashSync(password, 10) : null,
        password ? 1 : null,
        id
      );
-    if (request.body.roleIds) {
+    if (request.body.roleIds !== undefined) {
       db.prepare("DELETE FROM user_roles WHERE user_id = ?").run(id);
       const insertRole = db.prepare("INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)");
       for (const roleId of nextRoleIds ?? []) insertRole.run(id, roleId);
     }
-    if (request.body.managedDepartmentIds) {
-      db.prepare("DELETE FROM department_managers WHERE user_id = ?").run(id);
-      const insertManagerDepartment = db.prepare(
-        "INSERT OR IGNORE INTO department_managers (department_id, user_id) VALUES (?, ?)"
-      );
-      for (const managedDepartmentId of nextManagedDepartmentIds ?? []) insertManagerDepartment.run(managedDepartmentId, id);
-    }
+    const rolesForScope = nextRoles ?? ensureProcessRoleIds(nextProcessId, roleIds, false);
+    const managedProcessesForScope = nextManagedProcessIds ?? ensureManagedProcessIds(
+      (db
+        .prepare("SELECT process_id AS processId FROM production_process_supervisors WHERE user_id = ?")
+        .all(id) as Array<{ processId: number }>)
+        .map((row) => row.processId)
+    );
+    syncUserProcessScope(id, nextProcessId, rolesForScope, managedProcessesForScope);
   });
   try {
     update();

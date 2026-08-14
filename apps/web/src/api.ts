@@ -15,13 +15,13 @@ export type UserProfile = {
   displayName: string;
   employeeNo: string;
   position: string;
-  departmentId: number | null;
-  departmentName: string | null;
+  processId: number | null;
+  processName: string | null;
   status: "active" | "inactive";
   mustChangePassword: number;
   lastLoginAt: string | null;
   roles: Array<{ id: number; name: string; code: string }>;
-  managedDepartments: Array<{ id: number; name: string; code: string }>;
+  managedProcesses: Array<{ id: number; name: string; code: string }>;
   permissions: Permission[];
   authorizedProcessCodes: string[];
 };
@@ -30,7 +30,7 @@ export type UserListItem = Omit<UserProfile, "roles" | "permissions"> & {
   roleNames: string;
   roleCodes: string;
   roleIds: string;
-  managedDepartmentIds: string;
+  managedProcessIds: string;
 };
 
 export type User = UserProfile;

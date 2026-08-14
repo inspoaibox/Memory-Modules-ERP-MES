@@ -1832,9 +1832,9 @@ export async function registerProductionRoutes(
       users: db
         .prepare(
           `SELECT u.id, u.display_name AS displayName, u.employee_no AS employeeNo,
-                  u.position, u.department_id AS departmentId, d.name AS departmentName
+                  u.position, u.process_id AS processId, p.name AS processName
            FROM users u
-           LEFT JOIN departments d ON d.id = u.department_id
+           LEFT JOIN production_processes p ON p.id = u.process_id
            WHERE u.status = 'active'
            ORDER BY u.id`
         )
@@ -2059,9 +2059,9 @@ export async function registerProductionRoutes(
       items: db
         .prepare(
           `SELECT u.id, u.display_name AS displayName, u.employee_no AS employeeNo,
-                  u.position, u.department_id AS departmentId, d.name AS departmentName
+                  u.position, u.process_id AS processId, p.name AS processName
            FROM users u
-           LEFT JOIN departments d ON d.id = u.department_id
+           LEFT JOIN production_processes p ON p.id = u.process_id
            WHERE ${clauses.join(" AND ")}
            ORDER BY u.id`
         )
