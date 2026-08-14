@@ -603,7 +603,7 @@ function UsersPage({ currentUser }: { currentUser: User }) {
   const load = async () => {
     const [userResult, processResult, roleResult] = await Promise.all([
       request<{ items: UserListItem[] }>("/users"),
-      request<{ items: ProcessOption[] }>("/production/processes"),
+      request<{ items: ProcessOption[] }>("/system/process-options"),
       request<{ items: Role[] }>("/roles")
     ]);
     setUsers(userResult.items);

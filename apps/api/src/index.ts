@@ -374,6 +374,17 @@ app.get("/api/departments", { preHandler: requirePermission("system.departments.
   };
 });
 
+app.get("/api/system/process-options", { preHandler: requirePermission("system.users.view") }, async () => ({
+  items: db
+    .prepare(
+      `SELECT id, code, name, process_type AS processType, status
+       FROM production_processes
+       WHERE status = 'active'
+       ORDER BY sort_order, id`
+    )
+    .all()
+}));
+
 app.post<{
   Body: { name?: string; code?: string; description?: string };
 }>("/api/departments", { preHandler: requirePermission("system.departments.manage") }, async (request) => {
