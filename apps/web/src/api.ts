@@ -55,6 +55,7 @@ export type Role = {
   processId?: number | null;
   processCode?: string | null;
   processName?: string | null;
+  processType?: "manufacturing" | "testing" | "outsourcing" | "repair" | "warehouse" | "inspection" | null;
   roleKind?: "system" | "manager" | "operator";
 };
 

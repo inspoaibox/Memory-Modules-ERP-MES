@@ -30,8 +30,8 @@ export const permissionCatalog = [
   ["system.users.manage", "系统", "管理", "新增、编辑、停用员工账号"],
   ["system.roles.view", "系统", "查看", "查看角色与权限"],
   ["system.roles.manage", "系统", "管理", "创建角色、分配权限"],
-  ["system.departments.view", "工序", "查看", "查看工序部门与岗位"],
-  ["system.departments.manage", "工序", "管理", "新增、编辑工序部门"],
+  ["system.departments.view", "工序", "查看", "查看工序流程与岗位"],
+  ["system.departments.manage", "工序", "管理", "新增、编辑工序流程"],
   ["system.audit.view", "系统", "查看", "查看操作审计日志"],
   ["production.dashboard.view", "生产", "查看", "查看生产工作台"],
   ["production.processes.view", "生产", "查看", "查看工序定义"],
@@ -222,13 +222,11 @@ export function getProcessRoleDescription(processName: string, kind: ProcessRole
 
 function getProcessRolePermissionCodes(processType: BuiltinProductionProcess["processType"], kind: ProcessRoleKind) {
   const codes = [
-    "system.dashboard.view",
     "production.tasks.view",
     "production.operations.execute",
     "production.reports.view"
   ];
   if (kind === "manager") {
-    codes.push("production.dashboard.view");
     codes.push("production.routes.view");
     codes.push("production.workorders.view");
     codes.push("production.workorders.manage");
@@ -242,8 +240,10 @@ function getProcessRolePermissionCodes(processType: BuiltinProductionProcess["pr
   }
   if (processType === "repair") {
     codes.push("production.repairs.view");
-    codes.push("production.scrap-products.view");
-    if (kind === "manager") codes.push("production.repairs.manage");
+    if (kind === "manager") {
+      codes.push("production.repairs.manage");
+      codes.push("production.scrap-products.view");
+    }
   }
   return [...new Set(codes)];
 }
@@ -1340,12 +1340,12 @@ export function initializeDatabase() {
 
   db.prepare("UPDATE permissions SET module = ?, label = ? WHERE code = ?").run(
     "工序",
-    "查看工序部门与岗位",
+    "查看工序流程与岗位",
     "system.departments.view"
   );
   db.prepare("UPDATE permissions SET module = ?, label = ? WHERE code = ?").run(
     "工序",
-    "新增、编辑工序部门",
+    "新增、编辑工序流程",
     "system.departments.manage"
   );
 

@@ -174,6 +174,39 @@ function validatePermissionDependencies(permissionIds: number[]) {
   }
 }
 
+function collectPermissionCodesWithDependencies(codes: string[]) {
+  const selected = new Set<string>();
+  const visit = (code: string) => {
+    if (selected.has(code)) return;
+    selected.add(code);
+    for (const dependency of permissionDependencies[code] ?? []) visit(dependency);
+  };
+  for (const code of codes) visit(code);
+  return selected;
+}
+
+function getAssignableProcessRolePermissionCodes(processType: string, roleKind: "manager" | "operator") {
+  const codes = [
+    "production.tasks.view",
+    "production.operations.execute",
+    "production.reports.view"
+  ];
+  if (roleKind === "manager") {
+    codes.push("production.tasks.manage");
+    codes.push("production.workorders.manage");
+  }
+  if (processType === "testing" || processType === "inspection") {
+    codes.push("quality.inspection.view");
+    codes.push("quality.inspection.manage");
+  }
+  if (processType === "repair") {
+    codes.push("production.repairs.view");
+    codes.push("production.repairs.manage");
+    if (roleKind === "manager") codes.push("production.scrap-products.view");
+  }
+  return collectPermissionCodesWithDependencies(codes);
+}
+
 app.get("/api/health", async () => ({
   ok: true,
   service: "memory-erp-mes-api",
@@ -508,6 +541,7 @@ app.get("/api/roles", { preHandler: requirePermission("system.roles.view") }, as
         `
           SELECT r.id, r.name, r.code, r.description, r.status,
                  p.id AS processId, p.code AS processCode, p.name AS processName,
+                 p.process_type AS processType,
                  CASE
                    WHEN r.code = p.code || '-MANAGER' THEN 'manager'
                    WHEN r.code = p.code || '-OPERATOR' THEN 'operator'
@@ -544,6 +578,7 @@ app.get<{
     .prepare(
       `SELECT r.id, r.name, r.code, r.description, r.status,
               p.id AS processId, p.code AS processCode, p.name AS processName,
+              p.process_type AS processType,
               CASE
                 WHEN r.code = p.code || '-MANAGER' THEN 'manager'
                 WHEN r.code = p.code || '-OPERATOR' THEN 'operator'
@@ -590,27 +625,47 @@ app.put<{
 }>("/api/roles/:id", { preHandler: requirePermission("system.roles.manage") }, async (request) => {
   ensureSystemAdmin(request.user.id);
   const id = Number(request.params.id);
-  const existing = db.prepare("SELECT id, code FROM roles WHERE id = ?").get(id) as
-    | { id: number; code: string }
+  const existing = db
+    .prepare(
+      `SELECT r.id, r.code, p.process_type AS processType,
+              CASE
+                WHEN r.code = p.code || '-MANAGER' THEN 'manager'
+                WHEN r.code = p.code || '-OPERATOR' THEN 'operator'
+                ELSE 'system'
+              END AS roleKind
+       FROM roles r
+       LEFT JOIN production_processes p
+              ON r.code IN (p.code || '-MANAGER', p.code || '-OPERATOR')
+       WHERE r.id = ?`
+    )
+    .get(id) as
+    | { id: number; code: string; processType: string | null; roleKind: "system" | "manager" | "operator" }
     | undefined;
   if (!existing) throw app.httpErrors.notFound("角色不存在");
 
   const permissionIds = [...new Set((request.body.permissionIds ?? []).map(Number))].filter((permissionId) => Number.isInteger(permissionId) && permissionId > 0);
   if (request.body.permissionIds === undefined) throw app.httpErrors.badRequest("请明确提交角色权限");
-  const validPermissionCount = permissionIds.length
-    ? (db.prepare(`SELECT COUNT(*) AS count FROM permissions WHERE id IN (${permissionIds.map(() => "?").join(",")})`).get(...permissionIds) as { count: number }).count
-    : 0;
-  if (validPermissionCount !== permissionIds.length) throw app.httpErrors.badRequest("存在无效权限");
+  const selectedPermissions = permissionIds.length
+    ? db
+        .prepare(`SELECT id, code, label FROM permissions WHERE id IN (${permissionIds.map(() => "?").join(",")})`)
+        .all(...permissionIds) as Array<{ id: number; code: string; label: string }>
+    : [];
+  if (selectedPermissions.length !== permissionIds.length) throw app.httpErrors.badRequest("存在无效权限");
   validatePermissionDependencies(permissionIds);
   if (existing.code !== "SYSTEM_ADMIN" && permissionIds.length) {
     const restrictedCodes = ["system.users.manage", "system.roles.manage"];
-    const restrictedCount = (
-      db
-        .prepare(`SELECT COUNT(*) AS count FROM permissions WHERE id IN (${permissionIds.map(() => "?").join(",")}) AND code IN (?, ?)`)
-        .get(...permissionIds, ...restrictedCodes) as { count: number }
-    ).count;
-    if (restrictedCount > 0) {
+    if (selectedPermissions.some((permission) => restrictedCodes.includes(permission.code))) {
       throw app.httpErrors.forbidden("员工账号与角色授权仅限系统总管理员角色");
+    }
+  }
+  if (existing.code.startsWith("PROC-")) {
+    if (!existing.processType || !["manager", "operator"].includes(existing.roleKind)) {
+      throw app.httpErrors.badRequest("工序角色未绑定有效工序，请先检查工序流程");
+    }
+    const assignableCodes = getAssignableProcessRolePermissionCodes(existing.processType, existing.roleKind as "manager" | "operator");
+    const invalidPermission = selectedPermissions.find((permission) => !assignableCodes.has(permission.code));
+    if (invalidPermission) {
+      throw app.httpErrors.forbidden(`工序角色只能配置当前工序页面权限，不能授予“${invalidPermission.label}”`);
     }
   }
   if (existing.code === "SYSTEM_ADMIN") {

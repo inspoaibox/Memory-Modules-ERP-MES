@@ -656,6 +656,43 @@ function UserForm({ user, departments, roles, currentUser, onClose, onSaved }: {
   </form></Modal>;
 }
 
+type ProcessPermissionOption = {
+  code: string;
+  label: string;
+  detail: string;
+  managerOnly?: boolean;
+};
+
+const getProcessRolePermissionOptions = (role: Role | null, permissions: Permission[]) => {
+  if (!role?.processCode) return [];
+  const permissionCodes = new Set(permissions.map((permission) => permission.code));
+  const processName = role.processName ?? "当前工序";
+  const options: ProcessPermissionOption[] = [
+    { code: "production.tasks.view", label: `查看${processName}任务`, detail: "进入该工序页面，只查看对应工序任务和工单流转数据。" },
+    { code: "production.operations.execute", label: "开工与报工", detail: "执行本工序开工、报工、测试、拆解或组装等操作。" },
+    { code: "production.reports.view", label: "报工记录与任务输出", detail: "查看本工序报工记录，并支持任务预览、打印和下载。" },
+    { code: "production.tasks.manage", label: "派工与任务调整", detail: "给本工序员工分配任务，调整任务执行人。", managerOnly: true },
+    { code: "production.workorders.manage", label: "新建本工序工单", detail: "从当前工序页面发起并下达生产工单。", managerOnly: true }
+  ];
+  const isQualityProcess = role.processType === "testing" || role.processType === "inspection" || ["PROC-CHIP-TEST", "PROC-CHIP-RETEST", "PROC-AGING", "PROC-FQC"].includes(role.processCode);
+  if (isQualityProcess) {
+    options.push(
+      { code: "quality.inspection.view", label: "查看本工序质检", detail: "查看本工序产生的检验、隔离和放行记录。" },
+      { code: "quality.inspection.manage", label: "质检判定", detail: "对本工序待检任务执行判定、隔离和放行。" }
+    );
+  }
+  if (role.processType === "repair" || role.processCode === "PROC-REPAIR") {
+    options.push(
+      { code: "production.repairs.view", label: "查看不良维修", detail: "查看流入不良维修工序的维修批次和处理进度。" },
+      { code: "production.repairs.manage", label: "维修结算", detail: "登记维修完成、继续维修、合格、不良和报废数量。" },
+      { code: "production.scrap-products.view", label: "查看报废产品", detail: "查看维修结算形成的报废产品批次。", managerOnly: true }
+    );
+  }
+  return options
+    .filter((option) => permissionCodes.has(option.code))
+    .filter((option) => role.roleKind === "manager" || !option.managerOnly);
+};
+
 function RolesPage({ currentUser }: { currentUser: User }) {
   const [roles, setRoles] = useState<Role[]>([]);
   const [permissions, setPermissions] = useState<Permission[]>([]);
@@ -675,9 +712,9 @@ function RolesPage({ currentUser }: { currentUser: User }) {
     if (!selectedId) return;
     request<{ role: Role; permissions: Array<Permission & { enabled: number }> }>(`/roles/${selectedId}`).then((result) => { setRoleDetail(result.role); setEnabled(result.permissions.filter((item) => item.enabled).map((item) => item.id)); }).catch(() => undefined);
   }, [selectedId]);
-  const permissionGroups = useMemo(() => permissions.reduce<Record<string, Permission[]>>((groups, permission) => { (groups[permission.module] ??= []).push(permission); return groups; }, {}), [permissions]);
   const canManageRoles = currentUser.roles.some((role) => role.code === "SYSTEM_ADMIN");
   const permissionByCode = useMemo(() => new Map(permissions.map((permission) => [permission.code, permission])), [permissions]);
+  const processPermissionOptions = useMemo(() => getProcessRolePermissionOptions(roleDetail, permissions), [roleDetail, permissions]);
   const getDependencyCodes = (code: string, resolved = new Set<string>()): string[] => {
     if (resolved.has(code)) return [];
     resolved.add(code);
@@ -704,12 +741,31 @@ function RolesPage({ currentUser }: { currentUser: User }) {
     const dependencyIds = getDependencyCodes(permission.code).map((code) => permissionByCode.get(code)?.id).filter((dependencyId): dependencyId is number => dependencyId !== undefined);
     setEnabled((current) => [...new Set([...current, id, ...dependencyIds])]);
   };
+  const optionChecked = (code: string) => {
+    const permission = permissionByCode.get(code);
+    return Boolean(permission && enabled.includes(permission.id));
+  };
+  const toggleProcessPermission = (code: string) => {
+    const permission = permissionByCode.get(code);
+    if (permission) togglePermission(permission.id);
+  };
+  const collectSelectedProcessPermissionIds = () => {
+    const permissionIds = new Set<number>();
+    for (const option of processPermissionOptions) {
+      if (!optionChecked(option.code)) continue;
+      for (const code of [option.code, ...getDependencyCodes(option.code)]) {
+        const permission = permissionByCode.get(code);
+        if (permission) permissionIds.add(permission.id);
+      }
+    }
+    return [...permissionIds];
+  };
   const save = async () => {
     if (!selectedId) return;
     setError("");
     setSaving(true);
     try {
-      await request(`/roles/${selectedId}`, { method: "PUT", body: JSON.stringify({ permissionIds: enabled }) });
+      await request(`/roles/${selectedId}`, { method: "PUT", body: JSON.stringify({ permissionIds: collectSelectedProcessPermissionIds() }) });
       await load();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "权限保存失败");
@@ -719,7 +775,7 @@ function RolesPage({ currentUser }: { currentUser: User }) {
   };
   return <div><PageHeader eyebrow="系统管理 / 权限" title="工序角色权限" description="工序角色由工序流程自动生成，每道工序默认拥有主管和员工两类角色。" action={<div className="header-actions"><button className="secondary-button" onClick={() => load()}><RefreshCw size={16} />刷新角色</button></div>} />
     <div className="roles-layout"><section className="panel roles-list"><div className="panel-heading"><div><span className="eyebrow">按工序生成</span><h2>工序角色</h2></div><span className="count-label">{roles.length} 个</span></div>{roles.map((role) => <button className={`role-list-item ${selectedId === role.id ? "selected" : ""}`} key={role.id} onClick={() => setSelectedId(role.id)}><span className="role-symbol"><ShieldCheck size={17} /></span><span><strong>{role.name}</strong><small>{role.processName ? `${role.processName} · ${role.roleKind === "manager" ? "主管" : "员工"}` : role.code} · {role.userCount} 名员工</small></span><ArrowRight size={16} /></button>)}</section>
-       <section className="panel permission-panel"><div className="panel-heading"><div><span className="eyebrow">权限配置</span><h2>{roleDetail?.name ?? "选择角色"}</h2><p>{roleDetail?.description}</p></div>{selectedId && canManageRoles && <button className="primary-button" onClick={save} disabled={saving}>{saving ? "保存中..." : "保存权限"} <Check size={16} /></button>}</div>{error && <div className="form-error">{error}</div>}{Object.entries(permissionGroups).map(([module, modulePermissions]) => <div className="permission-group" key={module}><div className="permission-group-title"><span>{module}</span><small>{modulePermissions.length} 项权限</small></div>{modulePermissions.map((permission) => <label className="permission-row" key={permission.id}><input type="checkbox" disabled={!canManageRoles} checked={enabled.includes(permission.id)} onChange={() => togglePermission(permission.id)} /><span className="fake-checkbox">{enabled.includes(permission.id) && <Check size={13} />}</span><span><strong>{permission.label}</strong><small>{permission.action} · {permission.code}</small></span></label>)}</div>)}</section>
+       <section className="panel permission-panel"><div className="panel-heading"><div><span className="eyebrow">权限配置</span><h2>{roleDetail?.name ?? "选择角色"}</h2><p>{roleDetail?.description}</p></div>{selectedId && canManageRoles && <button className="primary-button" onClick={save} disabled={saving}>{saving ? "保存中..." : "保存权限"} <Check size={16} /></button>}</div>{error && <div className="form-error">{error}</div>}{roleDetail ? <div className="permission-group"><div className="permission-group-title"><span>{roleDetail.processName ?? "工序"}页面权限</span><small>{roleDetail.roleKind === "manager" ? "主管可配置全部操作" : "员工仅配置执行操作"}</small></div>{processPermissionOptions.map((option) => <label className="permission-row" key={option.code}><input type="checkbox" disabled={!canManageRoles} checked={optionChecked(option.code)} onChange={() => toggleProcessPermission(option.code)} /><span className="fake-checkbox">{optionChecked(option.code) && <Check size={13} />}</span><span><strong>{option.label}</strong><small>{option.detail}</small></span></label>)}{!processPermissionOptions.length && <EmptyState title="暂无可配置权限" description="请选择左侧由工序流程自动生成的主管或员工角色。" />}</div> : <EmptyState title="请选择工序角色" description="左侧选择某一道工序的主管或员工角色后，再配置该工序页面权限。" />}</section>
     </div>
   </div>;
 }
