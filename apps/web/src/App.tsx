@@ -71,6 +71,7 @@ import {
   ProductionQualityPage
 } from "./ProductionPage";
 import { ProductionStationPage } from "./ProductionStationPage";
+import { SalesOrdersPage } from "./SalesPage";
 
 type Page =
   | "dashboard"
@@ -109,9 +110,10 @@ type Page =
   | "inventory-counts"
   | "inventory-scrap"
   | "inventory-documents"
-  | "inventory-ledger";
+  | "inventory-ledger"
+  | "sales-orders";
 
-type NavSection = "system" | "products" | "production" | "production-settings" | "inventory";
+type NavSection = "system" | "products" | "production" | "production-settings" | "inventory" | "sales";
 
 type NavItem = {
   key: Page;
@@ -168,7 +170,8 @@ const pageLabels: Record<Page, string> = {
   "inventory-counts": "库存管理 / 库存盘点",
   "inventory-scrap": "库存管理 / 商品报废",
   "inventory-documents": "库存管理 / 出入库记录",
-  "inventory-ledger": "库存管理 / 库存台账"
+  "inventory-ledger": "库存管理 / 库存台账",
+  "sales-orders": "销售管理 / 销售跟单"
 };
 
 const legacyPageMap: Record<string, Page> = {
@@ -221,7 +224,8 @@ const navItems: NavItem[] = [
   { key: "inventory-counts", label: "库存盘点", icon: ClipboardCheck, permission: "inventory.documents.view", group: "业务模块", section: "inventory" },
   { key: "inventory-scrap", label: "商品报废", icon: Trash2, permission: "inventory.documents.view", group: "业务模块", section: "inventory" },
   { key: "inventory-documents", label: "出入库记录", icon: ClipboardList, permission: "inventory.documents.view", group: "业务模块", section: "inventory" },
-  { key: "inventory-ledger", label: "库存台账", icon: FileSpreadsheet, permission: "inventory.ledger.view", group: "业务模块", section: "inventory" }
+  { key: "inventory-ledger", label: "库存台账", icon: FileSpreadsheet, permission: "inventory.ledger.view", group: "业务模块", section: "inventory" },
+  { key: "sales-orders", label: "销售跟单", icon: ClipboardList, permission: "sales.orders.view", group: "业务模块", section: "sales" }
 ];
 
 const navSections: Array<{
@@ -235,7 +239,8 @@ const navSections: Array<{
   { key: "products", label: "商品管理", icon: PackageCheck, group: "业务模块", isActive: (page) => page.startsWith("product-") },
   { key: "production", label: "生产管理", icon: Factory, group: "业务模块", isActive: (page) => ["production-overview", "production-workorders", "production-disassembly", "production-assembly", "production-bga", "production-chip-initial-test", "production-outsource", "production-chip-retest", "production-smt", "production-aging", "production-fqc", "production-repairs", "production-scrap-products"].includes(page) },
   { key: "production-settings", label: "生产基础设置", icon: Settings2, group: "业务模块", isActive: (page) => ["production-tasks", "production-reports", "production-processes", "production-routes"].includes(page) },
-  { key: "inventory", label: "库存管理", icon: Warehouse, group: "业务模块", isActive: (page) => page.startsWith("inventory-") }
+  { key: "inventory", label: "库存管理", icon: Warehouse, group: "业务模块", isActive: (page) => page.startsWith("inventory-") },
+  { key: "sales", label: "销售管理", icon: ClipboardList, group: "业务模块", isActive: (page) => page === "sales-orders" }
 ];
 
 const hasPermission = (user: User | null, code: string) =>
@@ -352,6 +357,7 @@ function App() {
       {page === "inventory-scrap" && <InventoryScrapPage currentUser={user} />}
       {page === "inventory-documents" && <InventoryDocumentsPage currentUser={user} />}
       {page === "inventory-ledger" && <InventoryLedgerPage />}
+      {page === "sales-orders" && <SalesOrdersPage currentUser={user} />}
       {page === "quality" && <ProductionQualityPage currentUser={user} />}
       {user.mustChangePassword === 1 && <PasswordChangeModal onChanged={(result) => {
         localStorage.setItem("memory-erp-token", result.token);
@@ -465,7 +471,8 @@ function AppShell({
     products: page.startsWith("product-"),
     production: ["production-overview", "production-workorders", "production-disassembly", "production-assembly", "production-bga", "production-chip-initial-test", "production-outsource", "production-chip-retest", "production-smt", "production-aging", "production-fqc", "production-repairs", "production-scrap-products"].includes(page),
     "production-settings": ["production-tasks", "production-reports", "production-processes", "production-routes"].includes(page),
-    inventory: page.startsWith("inventory-")
+    inventory: page.startsWith("inventory-"),
+    sales: page === "sales-orders"
   }));
 
   useEffect(() => {

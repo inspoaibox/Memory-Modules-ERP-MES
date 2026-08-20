@@ -9,6 +9,7 @@ import {
   type WarehouseType,
   warehouseTypeValues
 } from "./db.js";
+import { finalizeSalesOrderForPostedDocument } from "./sales.js";
 
 declare module "@fastify/jwt" {
   interface FastifyJWT {
@@ -1637,6 +1638,7 @@ export async function registerInventoryRoutes(
           finalizeProductionTaskForPostedDocument(id);
           finalizeDisassemblyReportForPostedDocument(id);
           finalizeAssemblyReportForPostedDocument(id);
+          finalizeSalesOrderForPostedDocument(id);
       });
       post();
     } catch (error) {

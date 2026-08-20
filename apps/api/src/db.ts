@@ -82,7 +82,10 @@ export const permissionCatalog = [
   ["inventory.scrap.approve", "库存", "审批", "审批报废单"],
   ["inventory.scrap.post", "库存", "过账", "过账报废单"],
   ["inventory.balance.view", "库存", "查看", "查看库存余额"],
-  ["inventory.ledger.view", "库存", "查看", "查看库存台账"]
+  ["inventory.ledger.view", "库存", "查看", "查看库存台账"],
+  ["sales.orders.view", "销售", "查看", "查看销售跟单"],
+  ["sales.orders.manage", "销售", "管理", "新增、编辑和提交销售单"],
+  ["sales.orders.approve", "销售", "审批", "审批销售单并生成销售出库单"]
 ] as const;
 
 /** Role permissions must include the page-access permissions their actions depend on. */
@@ -122,7 +125,9 @@ export const permissionDependencies: Record<string, string[]> = {
   "inventory.counts.post": ["inventory.documents.view"],
   "inventory.scrap.create": ["inventory.documents.view", "inventory.items.view", "inventory.warehouses.view"],
   "inventory.scrap.approve": ["inventory.documents.view"],
-  "inventory.scrap.post": ["inventory.documents.view"]
+  "inventory.scrap.post": ["inventory.documents.view"],
+  "sales.orders.manage": ["sales.orders.view", "inventory.items.view", "inventory.warehouses.view"],
+  "sales.orders.approve": ["sales.orders.view", "inventory.issues.create"]
 };
 
 type BuiltinProductionProcess = {
@@ -788,6 +793,55 @@ export function initializeDatabase() {
       posted_at TEXT
     );
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sales_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sales_order_no TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'submitted', 'approved', 'partial_shipped', 'completed', 'cancelled')),
+      business_date TEXT NOT NULL,
+      customer_name TEXT NOT NULL,
+      customer_contact TEXT NOT NULL DEFAULT '',
+      customer_phone TEXT NOT NULL DEFAULT '',
+      customer_address TEXT NOT NULL DEFAULT '',
+      sales_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      total_quantity REAL NOT NULL DEFAULT 0,
+      total_amount REAL NOT NULL DEFAULT 0,
+      remark TEXT NOT NULL DEFAULT '',
+      created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      submitted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      submitted_at TEXT,
+      approved_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS sales_order_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sales_order_id INTEGER NOT NULL REFERENCES sales_orders(id) ON DELETE CASCADE,
+      line_no INTEGER NOT NULL,
+      item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE RESTRICT,
+      warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE RESTRICT,
+      quantity REAL NOT NULL CHECK (quantity > 0),
+      unit_price REAL NOT NULL DEFAULT 0 CHECK (unit_price >= 0),
+      amount REAL NOT NULL DEFAULT 0 CHECK (amount >= 0),
+      shipped_quantity REAL NOT NULL DEFAULT 0 CHECK (shipped_quantity >= 0),
+      lot_no TEXT NOT NULL DEFAULT '',
+      serial_no TEXT NOT NULL DEFAULT '',
+      remark TEXT NOT NULL DEFAULT '',
+      UNIQUE (sales_order_id, line_no)
+    );
+  `);
+
+  const stockDocumentColumns = db.prepare("PRAGMA table_info(stock_documents)").all() as Array<{ name: string }>;
+  if (!stockDocumentColumns.some((column) => column.name === "sales_order_id")) {
+    db.exec("ALTER TABLE stock_documents ADD COLUMN sales_order_id INTEGER REFERENCES sales_orders(id) ON DELETE SET NULL");
+  }
+  const stockDocumentLineColumns = db.prepare("PRAGMA table_info(stock_document_lines)").all() as Array<{ name: string }>;
+  if (!stockDocumentLineColumns.some((column) => column.name === "sales_order_line_id")) {
+    db.exec("ALTER TABLE stock_document_lines ADD COLUMN sales_order_line_id INTEGER REFERENCES sales_order_lines(id) ON DELETE SET NULL");
+  }
 
   const warehouseColumns = db.prepare("PRAGMA table_info(warehouses)").all() as Array<{ name: string }>;
   if (!warehouseColumns.some((column) => column.name === "address")) {

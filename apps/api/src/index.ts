@@ -16,6 +16,7 @@ import {
 import { seedDemoData } from "./demoSeed.js";
 import { registerInventoryRoutes } from "./inventory.js";
 import { registerProductionRoutes } from "./production.js";
+import { registerSalesRoutes } from "./sales.js";
 
 declare module "@fastify/jwt" {
   interface FastifyJWT {
@@ -77,6 +78,7 @@ function requirePermission(code: string) {
 
 await registerInventoryRoutes(app, { requirePermission, clientIp });
 await registerProductionRoutes(app, { requirePermission, clientIp });
+await registerSalesRoutes(app, { requirePermission, clientIp });
 
 function getUserProfile(userId: number) {
   const user = db
